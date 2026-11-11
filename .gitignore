@@ -23,3 +23,15 @@ _事件分级.md
 .demo-data/
 # 临时测试目录
 .sandbox/
+
+# 本地备份
+*.bak
+*.bak-*
+*.bak2-*
+*.bak3-*
+*.bak4-*
+*.bak5-*
+*.bak6-*
+*.bak7-*
+*.bak-*
+*.bak-refactor-*
