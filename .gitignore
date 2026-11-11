@@ -21,3 +21,5 @@ _事件分级.md
 *.swp
 # 演示数据
 .demo-data/
+# 临时测试目录
+.sandbox/
