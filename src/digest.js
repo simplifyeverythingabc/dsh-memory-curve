@@ -147,7 +147,13 @@ function renderDay(day, dayEvents, allEvents) {
   return out.join('\n');
 }
 
-/** 生成全部每日摘要；返回写入清单 */
+/**
+ * 生成全部每日摘要。会写文件。
+ *
+ * @param {string} memDir     完整流水目录，**读**这里
+ * @param {string} digestDir  摘要输出目录，**写**这里（`<DSH_HOME>/memory-notes/_digest`）
+ * @returns {{ written: Array<{day: string, chars: number}>, total: number, events: number }}
+ */
 export function buildDailies(memDir, digestDir) {
   const entries = readEntries(memDir);
   if (!entries.length) return { written: [], total: 0 };
@@ -190,14 +196,29 @@ export function buildDailies(memDir, digestDir) {
   return { written, total: entries.length, events: graded.length };
 }
 
-/** 读某天的摘要 */
+/**
+ * 读某天的摘要。
+ *
+ * @param {string} digestDir 摘要目录（`<DSH_HOME>/memory-notes/_digest`）。
+ *   **不是**流水目录。传错只会返回 null，不会报错。
+ * @param {string} day       日期，形如 `2026-11-11`
+ * @returns {string|null}    摘要正文；文件不存在时 null
+ */
 export function readDigest(digestDir, day) {
   const p = join(digestDir, `${day}.md`);
   if (!existsSync(p)) return null;
   return readFileSync(p, 'utf8');
 }
 
-/** 列出所有可用的日期（摘要目录与完整流水目录的并集） */
+/**
+ * 列出所有可用的日期，取摘要目录与流水目录的并集。
+ *
+ * 两个参数都是目录，顺序是「流水在前、摘要在后」；任何一个传 null 就跳过那一侧。
+ *
+ * @param {string|null} memDir     完整流水目录
+ * @param {string|null} digestDir  摘要目录
+ * @returns {string[]} 升序排列的 `YYYY-MM-DD`
+ */
 export function listDays(memDir, digestDir) {
   const set = new Set();
   for (const dir of [digestDir, memDir]) {
@@ -247,7 +268,14 @@ export function grepDay(memDir, day, pattern, maxChars = 4000) {
   return { total: hits.length, text: out.join('\n\n') };
 }
 
-/** 按 memory_id 精确取一条原文（锚点回查的终点） */
+/**
+ * 按 memory_id 精确取一条原文（锚点回查的终点）。
+ *
+ * @param {string} memDir 完整流水目录
+ * @param {string} id     `m_YYYYMMDD_<6位十六进制>`
+ * @returns {{ id: string, day: string, text: string } | null}
+ *   **是对象不是字符串**：`.text` 才是正文（首行含时间与说话人，后面是内容）
+ */
 export function readById(memDir, id) {
   const m = /^m_(\d{4})(\d{2})(\d{2})_([0-9a-f]{6})$/.exec(String(id || ''));
   if (!m) return null;
@@ -555,7 +583,17 @@ export function searchAll(memDir, pattern, opts = {}) {
   return { hits, total: totalHits, mode, relaxed, usedTerms: use };
 }
 
-/** 展开 id 范围 "m_a..m_b" -> [id...] */
+/**
+ * 展开 id 区间 `"m_a..m_b"`。
+ *
+ * 只接**内容哈希 id 的区间**。因为哈希是随机的，无法推算中间项，所以实现上
+ * 是把整份流水读一遍、筛出落在两天之间的 id，不是算术展开。
+ *
+ * 事件键（`e_YYYYMMDD_NNNN`）**不能**传这里，那种要用 `eventIds()`。
+ *
+ * @param {string} spec 形如 `"m_20260115_a1b2c3..m_20260120_d4e5f6"`
+ * @returns {string[]} 区间内的 id，按出现顺序；格式不对返回空数组
+ */
 export function expandRange(spec) {
   const s = String(spec || '').trim();
   const m = /^(m_\d{8}_[0-9a-f]{6})\.\.(m_\d{8}_[0-9a-f]{6})$/.exec(s);
@@ -574,6 +612,18 @@ export function expandRange(spec) {
   return [];
 }
 
+/**
+ * 把事件键展开成 id 列表。事件键来自 `gradeEvents()` 返回的 `eventKey` 字段
+ * （形如 `e_20261020_1518`），数据源是摘要目录里的 `YYYY-MM-DD.ids.json`。
+ *
+ * 注意 `expandRange()` 只接 `m_a..m_b` 这种 id 区间，**接不了事件键** —— 事件键
+ * 走这个函数。
+ *
+ * @param {string} digestDir 摘要目录（`<DSH_HOME>/memory-notes/_digest`），不是流水目录
+ * @param {string} eventKey  事件键，形如 `e_20261020_1518`
+ * @returns {{ ids: string[], count: number, level: string, day: string } | null}
+ *   键格式不对、当天没有 ids.json、或键不在这份索引里时返回 null
+ */
 export function eventIds(digestDir, eventKey) {
   const m = /^e_(\d{4})(\d{2})(\d{2})_\d{4}$/.exec(String(eventKey || ''));
   if (!m) return null;
