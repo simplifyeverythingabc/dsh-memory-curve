@@ -71,3 +71,5 @@ jobs:
             if (bad.length) { console.error('有事件没分级'); process.exit(1); }
             console.log('OK');
           "
+      - name: 检索质量基准
+        run: node tools/bench.mjs
