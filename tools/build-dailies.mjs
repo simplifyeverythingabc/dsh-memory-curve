@@ -10,7 +10,7 @@ const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 const DIG = join(DSH_HOME, 'memory-notes', '_digest');
 
 try {
-  const r = buildDailies(MEM, DIG);
+  const r = buildDailies({ memDir: MEM, digestDir: DIG });
   const chars = r.written.reduce((a, x) => a + x.chars, 0);
   console.log(`摘要 ${r.written.length} 天 / 条目 ${r.total} / 事件 ${r.events} / 共 ${chars} 字符`);
   console.log(`输出 ${DIG}`);

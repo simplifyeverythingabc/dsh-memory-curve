@@ -140,7 +140,7 @@ export function apply(ctx, config = {}) {
 
   // 启动时补一次每日摘要（失败不影响注入）
   try {
-    const r = buildDailies(memDir(), digestDir());
+    const r = buildDailies({ memDir: memDir(), digestDir: digestDir() });
     console.log(`[memory-curve] 每日摘要 ${r.written.length} 份，条目 ${r.total}，事件 ${r.events}`);
   } catch (err) {
     console.warn('[memory-curve] 每日摘要生成失败:', String(err?.message ?? err));
@@ -230,7 +230,7 @@ export function apply(ctx, config = {}) {
         render: (_a, v) => [{ type: 'text', text: v.text }],
       },
       async execute() {
-        const days = listDays(memDir(), digestDir());
+        const days = listDays({ memDir: memDir(), digestDir: digestDir() });
         return { text: `共 ${days.length} 天：\n` + days.join('\n') };
       },
       presentCall: () => ({ card: 'generic', title: '记忆日期', kind: 'other', rawInput: '' }),
@@ -271,7 +271,7 @@ export function apply(ctx, config = {}) {
       }
     } catch { /* 状态取不到就不降权，不影响搜索 */ }
 
-    const r = searchAll(memDir(), pat, { maxHits, digestDir: digestDir(), stateMap });
+    const r = searchAll({ memDir: memDir(), pattern: pat, maxHits, digestDir: digestDir(), stateMap });
         if (!r.total) return { text: `没搜到「${pat}」` };
         const lines = r.hits.map((h) => {
           const first = h.ids[0], last = h.ids[h.ids.length - 1];
@@ -308,11 +308,11 @@ export function apply(ctx, config = {}) {
       async execute(args) {
         const day = String(args?.day || '').trim();
         if (!day) return { text: '要给个日期，例如 2026-11-09' };
-        const t = readDigest(digestDir(), day);
+        const t = readDigest({ digestDir: digestDir(), day });
         if (t) return { text: t };
         // 摘要没生成过就现做一次
-        try { buildDailies(memDir(), digestDir()); } catch {}
-        const t2 = readDigest(digestDir(), day);
+        try { buildDailies({ memDir: memDir(), digestDir: digestDir() }); } catch {}
+        const t2 = readDigest({ digestDir: digestDir(), day });
         return { text: t2 || `没有 ${day} 的摘要。可用 memory_curve_days 看有哪些天。` };
       },
       presentCall: (a) => ({ card: 'generic', title: '查摘要', kind: 'other', rawInput: a?.day || '' }),
@@ -349,7 +349,7 @@ export function apply(ctx, config = {}) {
         // ① 单条 id
         if (typeof args?.id === 'string' && args.id.trim()) {
           const id = args.id.trim();
-          const one = readById(memDir(), id);
+          const one = readById({ memDir: memDir(), id });
           if (!one) return { text: `没有 id ${id}，检查是不是抄错了` };
           touch(accessFile(), [id], 'raw:id');
           return { text: `# ${one.id}　${one.day}\n\n${one.text}` };
@@ -363,7 +363,7 @@ export function apply(ctx, config = {}) {
             // event:e_20261109_1255 -> 从 ids.json 取完整数组。
             // 摘要里标 +N（不连续）的事件只能这样取，靠范围展开会拉进不属于它的条目。
             if (s2.startsWith('event:')) {
-              const r2 = eventIds(digestDir(), s2.slice(6));
+              const r2 = eventIds({ digestDir: digestDir(), eventKey: s2.slice(6) });
               if (!r2) return { text: `找不到事件 ${s2}，检查 _digest 下的 ids.json 是否存在` };
               evInfo = r2;
               ids = ids.concat(r2.ids);
@@ -378,14 +378,14 @@ export function apply(ctx, config = {}) {
             const { re } = makeMatcher(pat);   // 默认字面量，/.../ 才是正则
             const hit = [];
             for (const id of ids) {
-              const one = readById(memDir(), id);
+              const one = readById({ memDir: memDir(), id });
               if (!one) continue;
               if (re.test(one.text)) hit.push(id);
             }
             pool = hit;
           }
           if (!pool.length) return { text: `范围内没命中${pat ? `「${pat}」` : ''}（检查 ${ids.length} 条）` };
-          const r = readByIds(memDir(), pool, maxChars);
+          const r = readByIds({ memDir: memDir(), ids: pool, maxChars });
           // 只记「真正进入上下文」的那几条（受 maxChars 限制，实际取到 r.found 条）。
           // 整组 pool 全记会把没返回的也标成「被查过」，冷热信号就废了。
           touch(accessFile(), pool.slice(0, r.found), 'raw:ids');
@@ -396,7 +396,7 @@ export function apply(ctx, config = {}) {
         // ③ 日期 + 关键词
         const day = String(args?.day || '').trim();
         if (!day) return { text: '要给 id、ids 或 day 之一' };
-        const r = grepDay(memDir(), day, args?.pattern, maxChars);
+        const r = grepDay({ memDir: memDir(), day, pattern: args?.pattern, maxChars });
         if (!r) return { text: `没有 ${day} 那天完整流水` };
         // 按关键词模糊查也记访问：命中的条目算被用过
         try {
@@ -422,7 +422,7 @@ export function apply(ctx, config = {}) {
         render: (_a, v) => [{ type: 'text', text: `重算完成：${v.days} 天 / ${v.entries} 条 / ${v.events} 事件，摘要共 ${v.chars} 字符\n分级报告：${v.report}` }],
       },
       async execute() {
-        const r = buildDailies(memDir(), digestDir());
+        const r = buildDailies({ memDir: memDir(), digestDir: digestDir() });
         const { graded } = build();
         try { mkdirSync(join(dshHome(), 'memory-notes'), { recursive: true }); } catch {}
         try { writeFileSync(gradeFile(), report(graded), 'utf8'); } catch {}

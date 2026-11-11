@@ -204,6 +204,71 @@ R = exp(−距今小时 ÷ (S × 24))
 
 ---
 
+## JavaScript API
+
+`src/digest.js` 导出的函数**统一用对象参数**，不位置传参。这样加参数不会打断已有调用，也不会出现「第一个参数到底是目录还是日期」这种歧义。
+
+```js
+import {
+  readEntries, clusterEvents, gradeEvents, renderForPrompt,
+} from './src/events.js';
+import {
+  buildDailies, readDigest, listDays, grepDay,
+  readById, readByIds, searchAll, expandRange, eventIds, makeMatcher,
+} from './src/digest.js';
+
+const memDir = 'C:/Users/you/.dsh/memory';
+const digestDir = 'C:/Users/you/.dsh/memory-notes/_digest';
+
+const entries = readEntries(memDir);
+const graded = gradeEvents(clusterEvents(entries));
+const index = renderForPrompt(graded, { maxT1: 12, maxT2: 20, maxT3: 8 });
+
+const days = listDays({ memDir, digestDir });                          // string[]
+const md = readDigest({ digestDir, day: '2026-11-11' });              // string | null
+const hits = searchAll({ memDir, pattern: '缓存', maxHits: 5, digestDir });
+
+const one = readById({ memDir, id: 'm_20260115_a1b2c3' });            // { id, day, text } | null
+console.log(one.text);
+```
+
+### 参数表
+
+| 函数 | 参数 | 返回 | 注意 |
+|---|---|---|---|
+| `buildDailies` | `{ memDir, digestDir }` | `{ written, total, events }` | 读 memDir，**写** digestDir |
+| `readDigest` | `{ digestDir, day }` | `string \| null` | 第一个字段是**摘要目录** |
+| `listDays` | `{ memDir, digestDir }` | `string[]` | 两个都是目录，任一传 `null` 就跳过 |
+| `grepDay` | `{ memDir, day, pattern, maxChars }` | `string` | — |
+| `readById` | `{ memDir, id }` | `{ id, day, text } \| null` | **返回对象**，`.text` 是正文 |
+| `readByIds` | `{ memDir, ids, maxChars }` | `{ text, missing }` | — |
+| `searchAll` | `{ memDir, pattern, maxHits, window, digestDir, stateMap }` | `{ hits, total, mode }` | 其余都进 `opts` |
+| `expandRange` | `spec`（字符串） | `string[]` | 只接 `m_a..m_b`，**不接事件键** |
+| `eventIds` | `{ digestDir, eventKey }` | `{ ids, count, level, day } \| null` | 事件键走这个 |
+| `makeMatcher` | `pattern`（字符串） | `{ re }` | 单参数，保持位置传参 |
+
+`expandRange` 和 `makeMatcher` 只有一个参数，没有歧义，保持位置传参。
+
+### 传错会怎样
+
+用老的位置传参调新签名，会立刻抛 `TypeError` 并告诉你正确写法：
+
+```js
+readDigest(digestDir, '2026-11-11')
+// TypeError: readDigest 的参数改成了对象形式：readDigest({ digestDir, day })
+```
+
+**不做静默兼容**——两套签名并存会让人猜不透当前该用哪个，错误也更容易藏在深处。
+
+### 为什么返回对象而不是字符串
+
+`readById` 返回 `{ id, day, text }` 而不是直接返回正文：
+
+- `day` 是这一天，调用方经常要按天分组
+- `id` 是回填给 `access.json` 做访问计数用的
+- `text` 里**含首行**（时间 + 说话人），原样取出来就能直接展示
+
+只返回 `text` 的话，前两样每次都得重新解析。
 ## 验证它能不能跑
 
 仓库里带了个自检脚本，不需要 DSH 在运行，也不碰你的真实数据：

@@ -154,7 +154,11 @@ function renderDay(day, dayEvents, allEvents) {
  * @param {string} digestDir  摘要输出目录，**写**这里（`<DSH_HOME>/memory-notes/_digest`）
  * @returns {{ written: Array<{day: string, chars: number}>, total: number, events: number }}
  */
-export function buildDailies(memDir, digestDir) {
+export function buildDailies(arg) {
+  if (typeof arg === 'string') {
+    throw new TypeError('buildDailies 的参数改成了对象形式：buildDailies({ memDir, digestDir })');
+  }
+  const { memDir, digestDir } = arg || {};
   const entries = readEntries(memDir);
   if (!entries.length) return { written: [], total: 0 };
 
@@ -204,7 +208,11 @@ export function buildDailies(memDir, digestDir) {
  * @param {string} day       日期，形如 `2026-11-11`
  * @returns {string|null}    摘要正文；文件不存在时 null
  */
-export function readDigest(digestDir, day) {
+export function readDigest(arg) {
+  if (typeof arg === 'string') {
+    throw new TypeError('readDigest 的参数改成了对象形式：readDigest({ digestDir, day })');
+  }
+  const { digestDir, day } = arg || {};
   const p = join(digestDir, `${day}.md`);
   if (!existsSync(p)) return null;
   return readFileSync(p, 'utf8');
@@ -219,7 +227,11 @@ export function readDigest(digestDir, day) {
  * @param {string|null} digestDir  摘要目录
  * @returns {string[]} 升序排列的 `YYYY-MM-DD`
  */
-export function listDays(memDir, digestDir) {
+export function listDays(arg) {
+  if (typeof arg === 'string') {
+    throw new TypeError('listDays 的参数改成了对象形式：listDays({ memDir, digestDir })');
+  }
+  const { memDir, digestDir } = arg || {};
   const set = new Set();
   for (const dir of [digestDir, memDir]) {
     if (!dir) continue;          // searchAll 只传 memDir，digestDir 可能为 null
@@ -233,7 +245,11 @@ export function listDays(memDir, digestDir) {
 }
 
 /** 某天完整流水里按关键词过滤条目（用于「按摘要反查原文」） */
-export function grepDay(memDir, day, pattern, maxChars = 4000) {
+export function grepDay(arg) {
+  if (typeof arg === 'string') {
+    throw new TypeError('grepDay 的参数改成了对象形式：grepDay({ memDir, day, pattern, maxChars })');
+  }
+  const { memDir, day, pattern, maxChars = 4000 } = arg || {};
   const p = join(memDir, `${day}.md`);
   if (!existsSync(p)) return null;
   const raw = readFileSync(p, 'utf8');
@@ -276,7 +292,11 @@ export function grepDay(memDir, day, pattern, maxChars = 4000) {
  * @returns {{ id: string, day: string, text: string } | null}
  *   **是对象不是字符串**：`.text` 才是正文（首行含时间与说话人，后面是内容）
  */
-export function readById(memDir, id) {
+export function readById(arg) {
+  if (typeof arg === 'string') {
+    throw new TypeError('readById 的参数改成了对象形式：readById({ memDir, id })');
+  }
+  const { memDir, id } = arg || {};
   const m = /^m_(\d{4})(\d{2})(\d{2})_([0-9a-f]{6})$/.exec(String(id || ''));
   if (!m) return null;
   const day = `${m[1]}-${m[2]}-${m[3]}`;
@@ -309,11 +329,15 @@ export function readById(memDir, id) {
 }
 
 /** 按 id 前缀或日期范围批量取（给「回查一段」用） */
-export function readByIds(memDir, ids, maxChars = 4000) {
+export function readByIds(arg) {
+  if (typeof arg === 'string') {
+    throw new TypeError('readByIds 的参数改成了对象形式：readByIds({ memDir, ids, maxChars })');
+  }
+  const { memDir, ids, maxChars = 4000 } = arg || {};
   const res = [];
   let used = 0;
   for (const id of ids) {
-    const one = readById(memDir, id);
+    const one = readById({ memDir, id });
     if (!one) continue;
     if (used + one.text.length > maxChars) break;
     res.push(one.text);
@@ -379,7 +403,11 @@ export function makeMatcher(pattern) {
  * 多词：默认 AND；无结果时**逐级放宽**（每次丢掉当日命中最少的那个词），
  * 不是一步退到 OR —— 全 OR 等于把 query 拆散。
  */
-export function searchAll(memDir, pattern, opts = {}) {
+export function searchAll(arg) {
+  if (typeof arg === 'string') {
+    throw new TypeError('searchAll 的参数改成了对象形式：searchAll({ memDir, pattern, maxHits, digestDir })');
+  }
+  const { memDir, pattern, ...opts } = arg || {};
   const maxHits = typeof opts.maxHits === 'number' ? opts.maxHits : 10;
   const win = typeof opts.window === 'number' ? opts.window : 130;
   const digestDir = opts.digestDir || null;
@@ -397,7 +425,7 @@ export function searchAll(memDir, pattern, opts = {}) {
   if (!use0.length) return { hits: [], total: 0, mode: 'none', relaxed: 0 };
   const cited = digestCited(digestDir);
 
-  const days = listDays(memDir, digestDir).slice().reverse();
+  const days = listDays({ memDir, digestDir }).slice().reverse();
   const blocks = [];
   const HEAD = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+［(.+?)］(?:\s*<!--\s*(m_[0-9]{8}_[0-9a-f]{6})\s*-->)?\s*$/;
 
@@ -624,7 +652,11 @@ export function expandRange(spec) {
  * @returns {{ ids: string[], count: number, level: string, day: string } | null}
  *   键格式不对、当天没有 ids.json、或键不在这份索引里时返回 null
  */
-export function eventIds(digestDir, eventKey) {
+export function eventIds(arg) {
+  if (typeof arg === 'string') {
+    throw new TypeError('eventIds 的参数改成了对象形式：eventIds({ digestDir, eventKey })');
+  }
+  const { digestDir, eventKey } = arg || {};
   const m = /^e_(\d{4})(\d{2})(\d{2})_\d{4}$/.exec(String(eventKey || ''));
   if (!m) return null;
   const day = `${m[1]}-${m[2]}-${m[3]}`;
