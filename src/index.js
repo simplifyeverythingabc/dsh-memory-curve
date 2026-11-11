@@ -24,6 +24,8 @@ import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } 
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL, dump as dumpAccess } from './access.js';
 
+export const name = 'memory-curve';
+
 export const inject = ['systemPrompt', 'tools'];
 
 const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');

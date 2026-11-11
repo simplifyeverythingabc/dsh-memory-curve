@@ -1,20 +1,30 @@
 #!/usr/bin/env node
 /**
- * 干净环境验证脚本。
+ * 干净环境验证脚本 —— 按真宿主的校验规则模拟。
  *
  * 模拟「别人刚装完」的场景：一份全新的内存目录、一个空的 DSH_HOME，
  * 从零加载插件，检查工具注册、context 注入、以及每个工具能不能真的干活。
  *
+ * 这里的「假宿主」不是随便写的空壳 —— 校验规则照抄 DSH 的真实实现：
+ *
+ *   systemPrompt.context(context)
+ *     要求 context.order 是有限数字，否则抛 TypeError
+ *     （dsh-system-prompt/lib/index.js: context() 第一行就检查）
+ *
+ *   tools.register(definition)
+ *     要求 definition.output 是对象，且 output.render 是函数，否则抛 TypeError
+ *     （dsh-tools/lib/index.js: register() 开头就是这三个 instanceof 判断）
+ *
+ *   ctx.effect(callback, label)
+ *     callback 执行，返回 disposer 函数；disposer 被调用时清理
+ *
+ * 故意用真规则而不是宽松模拟 —— 如果插件漏了哪个字段，这里就该红。
+ *
  * 用法：
  *   node tools/selftest.mjs
- *
- * 默认在系统临时目录里造一份最小流水，跑完自动清理。
- * 如果临时目录不可写（某些受限环境），用 MC_SELFTEST_ROOT 指定一个可写目录：
  *   MC_SELFTEST_ROOT=/path/to/writable node tools/selftest.mjs
- *
- * 不需要 DSH 在跑，不需要真实历史数据。
  */
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -51,92 +61,156 @@ process.env.DSH_MEMORY_DIR = memDir;
 process.env.DSH_HOME = dshHome;
 
 const rows = [];
-const say = (ok, name, note = '') => {
-  rows.push([ok, name, note]);
-  console.log(`  ${ok} ${name.padEnd(24)} ${note}`);
-};
+const ok = (name, note = '') => { rows.push([true, name, note]); console.log(`  ✓ ${name.padEnd(26)} ${note}`); };
+const bad = (name, note = '') => { rows.push([false, name, note]); console.log(`  ✗ ${name.padEnd(26)} ${note}`); };
 
 let failed = 0;
+const fail = (name, note) => { bad(name, note); failed++; };
 
 try {
   const mod = await import('../src/index.js');
 
-  say('✓', '模块加载', `inject=${JSON.stringify(mod.inject)}`);
-  if (!Array.isArray(mod.inject) || !mod.inject.includes('systemPrompt')) {
-    say('✗', 'inject 声明', '缺少 systemPrompt');
-    failed++;
+  // ── 声明层
+  if (!Array.isArray(mod.inject) || !mod.inject.includes('systemPrompt') || !mod.inject.includes('tools')) {
+    fail('inject 声明', `要为 ["systemPrompt","tools"]，实际 ${JSON.stringify(mod.inject)}`);
+  } else {
+    ok('inject 声明', JSON.stringify(mod.inject));
   }
+  if (typeof mod.apply !== 'function') fail('apply 导出', `实际是 ${typeof mod.apply}`);
+  else ok('apply 导出', 'function');
+  if (typeof mod.name !== 'string') fail('name 导出', `实际是 ${typeof mod.name}`);
+  else ok('name 导出', mod.name);
 
+  // ── 假宿主：照真宿主的校验规则
   const tools = {};
-  let contextText = null;
+  const contexts = [];
+  const effects = [];
   const disposers = [];
 
+  let contextSeq = 0;
   const ctx = {
-    effect(fn) { return fn(); },
+    // 真签名：effect(callback, label)，callback 返回 disposer
+    effect(callback, label) {
+      effects.push(label || `effect-${effects.length}`);
+      const inner = callback();
+      const dispose = typeof inner === 'function' ? inner : () => {};
+      disposers.push(dispose);
+      return dispose;
+    },
     systemPrompt: {
-      context(def) {
-        contextText = def.text;
+      // 真校验：order 必须是有限数字
+      context(definition) {
+        if (!definition || typeof definition !== 'object') {
+          throw new TypeError('prompt context must be an object');
+        }
+        if (!Number.isFinite(definition.order)) {
+          throw new TypeError(`prompt context "${definition.name}" order must be a finite number`);
+        }
+        if (typeof definition.name !== 'string' || !definition.name) {
+          throw new TypeError('prompt context name must be a non-empty string');
+        }
+        if (typeof definition.text !== 'function' && typeof definition.text !== 'string') {
+          throw new TypeError(`prompt context "${definition.name}" text must be a string or function`);
+        }
+        contexts.push({ ...definition, seq: contextSeq++ });
+        return () => {};
+      },
+      variable(name, value) {
+        if (typeof name !== 'string' || !name) throw new TypeError('variable name must be a non-empty string');
+        contexts.push({ kind: 'variable', name, value, seq: contextSeq++ });
         return () => {};
       },
     },
     tools: {
-      register(def) {
-        tools[def.name] = def;
-        return () => {};
+      // 真校验：output 必须是对象且 render 必须是函数
+      register(definition, options = {}) {
+        const name = definition && definition.name;
+        const output = definition && definition.output;
+        if (output === undefined || typeof output !== 'object' || typeof output.render !== 'function') {
+          throw new TypeError(`tool "${name}" must declare output.render as a function`);
+        }
+        if (output.presentationMeta !== undefined && typeof output.presentationMeta !== 'function') {
+          throw new TypeError(`tool "${name}" output.presentationMeta must be a function when present`);
+        }
+        if (typeof name !== 'string' || !name) {
+          throw new TypeError('tool name must be a non-empty string');
+        }
+        if (tools[name]) {
+          throw new TypeError(`tool "${name}" already registered`);
+        }
+        if (definition.parameters && definition.parameters.type !== 'object') {
+          throw new TypeError(`tool "${name}" parameters must be an object schema`);
+        }
+        tools[name] = definition;
+        return () => { delete tools[name]; };
       },
+      restrict() { return () => {}; },
     },
+    get(key) { return undefined; },
   };
 
-  mod.apply(ctx, { maxT1: 12, maxT2: 20, maxT3: 8 });
-  say('✓', 'apply()', `注册 ${Object.keys(tools).length} 个工具`);
+  // ── apply
+  try {
+    mod.apply(ctx, { maxT1: 12, maxT2: 20, maxT3: 8 });
+    ok('apply() 执行', `注册 ${Object.keys(tools).length} 个工具，${contexts.length} 个 context`);
+  } catch (e) {
+    fail('apply() 执行', e.message.slice(0, 80));
+  }
 
+  // ── 工具齐全
   const expected = [
     'memory_search', 'memory_curve_day', 'memory_curve_raw',
     'memory_curve_days', 'memory_curve_show', 'memory_curve_build',
   ];
-  for (const name of expected) {
-    if (!tools[name]) { say('✗', name, '没注册'); failed++; }
-  }
-  if (!failed) say('✓', '六个工具齐全');
+  const missing = expected.filter(n => !tools[n]);
+  if (missing.length) fail('六个工具齐全', '缺 ' + missing.join(', '));
+  else ok('六个工具齐全');
 
-  if (typeof contextText !== 'function') {
-    say('✗', 'context 注入', 'text 不是函数');
-    failed++;
+  // ── context 注入
+  const ctxDef = contexts.find(c => c.kind !== 'variable' && c.name === 'memory-curve-index');
+  if (!ctxDef) {
+    fail('context 注册', '没找到 name=memory-curve-index 的 context');
   } else {
-    const out = String(contextText());
-    say('✓', 'context 求值', `${out.length} 字符`);
-    if (!out.includes('记忆事件索引')) {
-      say('✗', 'context 内容', '缺少标题行');
-      failed++;
+    ok('context 注册', `order=${ctxDef.order} interpolate=${ctxDef.interpolate}`);
+    if (ctxDef.interpolate !== false) {
+      fail('interpolate 设置', `必须是 false，实际 ${ctxDef.interpolate}（记忆正文里出现 {{ 会抛错）`);
+    } else {
+      ok('interpolate 设置', 'false —— 正文含 {{ 也不会被解析');
+    }
+    if (typeof ctxDef.text !== 'function') {
+      fail('context.text', `应该是函数（每步重算），实际 ${typeof ctxDef.text}`);
+    } else {
+      const out = String(ctxDef.text());
+      ok('context 求值', `${out.length} 字符`);
+      if (!out.includes('记忆事件索引')) fail('context 内容', '缺少标题行');
     }
   }
 
-  // 工具实测：execute() 拿原始返回，再转成文本（模拟宿主流程）
-  // 有 render 的走 render，没有的直接读 .text，都没有就 JSON 化
+  // ── 工具有没有真的干活
   const toText = (name, raw) => {
     const tool = tools[name];
-    if (tool && typeof tool.render === 'function') {
+    if (tool && tool.output && typeof tool.output.render === 'function') {
       try {
-        const parts = tool.render({}, raw);
+        const parts = tool.output.render({}, raw);
         if (Array.isArray(parts)) {
           const joined = parts.map(p => (p && p.text) || '').filter(Boolean).join('\n');
           if (joined) return joined;
         }
-      } catch { /* render 失败就退回下面的兜底 */ }
+      } catch { /* 退回兜底 */ }
     }
     if (raw && typeof raw === 'object' && typeof raw.text === 'string') return raw.text;
     return JSON.stringify(raw);
   };
 
   const run = async (name, fn) => {
+    if (!tools[name]) return '';
     try {
       const raw = await fn();
       const text = toText(name, raw);
-      say('✓', name, String(text).split('\n')[0].slice(0, 62));
+      ok(name, String(text).split('\n')[0].slice(0, 58));
       return text;
     } catch (e) {
-      say('✗', name, e.message.slice(0, 70));
-      failed++;
+      fail(name, e.message.slice(0, 70));
       return '';
     }
   };
@@ -147,26 +221,32 @@ try {
   await run('memory_curve_day', () => tools.memory_curve_day.execute({ day: '2026-01-15' }));
   await run('memory_curve_show', () => tools.memory_curve_show.execute({ level: 'T1', maxChars: 300 }));
 
-  // raw 需要先搜出 id
   const m = searchText.match(/m_\d{8}_[0-9a-f]{6}/);
   if (m) {
     await run('memory_curve_raw', () => tools.memory_curve_raw.execute({ id: m[0], maxChars: 100 }));
   } else {
-    say('✗', 'memory_curve_raw', '搜索结果里没有 id，跳过');
-    failed++;
+    fail('memory_curve_raw', '搜索结果里没有 id');
   }
 
-  console.log('');
-  if (failed) {
-    console.log(`✗ ${failed} 项失败`);
-  } else {
-    console.log('✓ 全部通过 —— 干净环境可跑');
+  // ── 清理：所有 disposer 都应能安全调用（不能抛）
+  try {
+    for (const d of disposers) d();
+    ok('disposer 可调用', `${disposers.length} 个全部无异常`);
+  } catch (e) {
+    fail('disposer 可调用', e.message.slice(0, 70));
   }
+
+  // ── 报告
+  console.log('');
+  console.log(`  检查项 ${rows.length}　通过 ${rows.length - failed}　失败 ${failed}`);
 } catch (e) {
-  console.log(`✗ 致命错误: ${e.message}`);
+  console.log(`  ✗ 致命错误: ${e.message}`);
+  if (process.env.MC_SELFTEST_DEBUG) console.error(e);
   failed++;
 } finally {
   try { rmSync(root, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
 }
 
+console.log('');
+console.log(failed ? `✗ ${failed} 项失败` : '✓ 全部通过 —— 干净环境可跑');
 process.exit(failed ? 1 : 0);
