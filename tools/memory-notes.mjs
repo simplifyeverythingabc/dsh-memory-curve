@@ -20,10 +20,31 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import zlib from 'node:zlib';
 
-const SESSIONS = process.env.DSH_HOME
-  ? path.join(process.env.DSH_HOME, 'sessions')
-  : path.join(process.env.USERPROFILE || '', '.dsh', 'sessions');
-const OUT = process.env.MEMORY_GALAXY_DIR || path.join(process.env.USERPROFILE || '', '.dsh', 'memory-notes');
+// 会话日志目录：DSH_HOME/sessions
+const DSH_HOME = process.env.DSH_HOME
+  || path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh');
+const SESSIONS = path.join(DSH_HOME, 'sessions');
+
+// 流水输出目录 —— 必须和插件 src/index.js 的 memDir() 算出同样的值，
+// 否则生成的内容插件读不到（早期版本就踩过这个坑：这里写 memory-notes，
+// 插件读 D:\memory，中间靠一个手写的 ps1 同步，别人装完根本用不了）。
+//
+// 优先级和 memDir() 保持一致：
+//   1. DSH_MEMORY_DIR
+//   2. MEMORY_GALAXY_DIR（兼容旧的）
+//   3. D:\memory（Windows 老位置，存在就用）
+//   4. <DSH_HOME>/memory
+function resolveMemDir() {
+  const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
+  if (explicit) return explicit;
+  const legacy = 'D:\\memory';
+  try {
+    if (fs.existsSync(legacy)) return legacy;
+  } catch { /* 无权限时忽略 */ }
+  return path.join(DSH_HOME, 'memory');
+}
+
+const OUT = resolveMemDir();
 
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 // 完整记忆优先：不设实质上限（星系单文件上限是 6MB，远没到）。
