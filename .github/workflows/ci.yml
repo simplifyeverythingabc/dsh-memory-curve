@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  syntax:
+    name: 语法检查
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 逐个检查源码语法
+        run: |
+          set -e
+          for f in src/*.js tools/*.mjs; do
+            echo "checking $f"
+            node --check "$f"
+          done
+
+      - name: 检查 package.json 合法性
+        run: node -e "const p=require('./package.json'); if(!p.name||!p.version||!p.exports) process.exit(1); console.log(p.name, p.version)"
+
+  smoke:
+    name: 冒烟测试
+    runs-on: ubuntu-latest
+    needs: syntax
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 建一份最小流水
+        run: |
+          mkdir -p /tmp/memory
+          cat > /tmp/memory/2026-01-15.md <<'EOF'
+          2026-01-15 10:00 ［用户］ <!-- m_20260115_a1b2c3 -->
+          连接池超时怎么排查
+
+          2026-01-15 10:01 ［助手］ <!-- m_20260115_d4e5f6 -->
+          先看 maxWait 和数据库的 wait_timeout，两边对不上就会超时。
+          EOF
+
+      - name: 用最小流水跑一遍分级
+        env:
+          DSH_MEMORY_DIR: /tmp/memory
+          DSH_HOME: /tmp/dsh-home
+        run: |
+          node --input-type=module -e "
+            import { readEntries, clusterEvents, gradeEvents } from './src/events.js';
+            const entries = readEntries('/tmp/memory');
+            if (entries.length !== 2) { console.error('条目数不对:', entries.length); process.exit(1); }
+            const events = clusterEvents(entries);
+            if (events.length === 0) { console.error('没聚出事件'); process.exit(1); }
+            const graded = gradeEvents(events, Date.now(), () => ({ n: 0, last: null }));
+            console.log('条目', entries.length, '事件', events.length, '分级', graded.length);
+            const bad = graded.filter(g => !g.level);
+            if (bad.length) { console.error('有事件没分级'); process.exit(1); }
+            console.log('OK');
+          "

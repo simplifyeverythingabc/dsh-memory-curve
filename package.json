@@ -1,9 +1,18 @@
 {
   "name": "dsh-memory-curve",
   "version": "0.1.0",
-  "description": "按艾宾浩斯遗忘曲线给记忆事件分级：高留存的进上下文，低留存的只留文件。完整记忆仍在 D:\\memory，上下文只吃事件标题（975 条 → 400 余字）。",
+  "description": "按艾宾浩斯遗忘曲线给记忆事件分级：高留存的进上下文，低留存的只留文件。上千条对话压成几百字索引，完整记忆仍在磁盘上按需反查。",
   "type": "module",
   "license": "MIT",
+  "author": "simplifyeverythingabc",
+  "homepage": "https://github.com/simplifyeverythingabc/dsh-memory-curve#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/simplifyeverythingabc/dsh-memory-curve.git"
+  },
+  "bugs": {
+    "url": "https://github.com/simplifyeverythingabc/dsh-memory-curve/issues"
+  },
   "exports": {
     ".": "./src/index.js",
     "./events": "./src/events.js",
@@ -12,7 +21,9 @@
   "files": [
     "src",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "main": "./src/index.js",
   "dsh": {
@@ -27,7 +38,9 @@
     "cordis",
     "memory",
     "ebbinghaus",
-    "forgetting-curve"
+    "forgetting-curve",
+    "context-management",
+    "agent-memory"
   ],
   "dsh-plugin": {
     "category": "memory",
@@ -35,5 +48,10 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/events.js && node --check src/digest.js && node --check src/access.js",
+    "verify": "node tools/verify-ids.mjs",
+    "build": "node tools/build-dailies.mjs"
   }
 }

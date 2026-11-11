@@ -19,3 +19,5 @@ _事件分级.md
 .vscode/
 .idea/
 *.swp
+# 演示数据
+.demo-data/
