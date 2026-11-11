@@ -57,7 +57,7 @@ function tailLine(texts) {
 function topKeywords(dayEvents, allEvents) {
   // 召回靠的是「摘要里有没有这个词」，不是「这个词重不重要」。
   // 所以这里分两档并放开数量：术语（英文/数字/十六进制/路径）宁可多列，
-  // 也不能把 libtprt、0x7db4 这种用户真会问的词滤掉 —— 被 IDF 滤掉过一次。
+  // 也不能把 maxLifetime、fetchSize 这种用户真会问的词滤掉 —— 被 IDF 滤掉过一次。
   const N = Math.max(allEvents.length, 1);
   const toksOf = (ev) => ev.toks || new Set(ev.topics || []);
   const df = new Map();
@@ -74,7 +74,7 @@ function topKeywords(dayEvents, allEvents) {
       const idf = Math.log(N / (1 + (df.get(t) || 1)));
       const isTerm = /^[a-z0-9_.:/-]+$/.test(t);
       if (isTerm) {
-        // 术语不看 IDF，只看出现频次：libtprt 遍布多天但照样是关键线索
+        // 术语不看 IDF，只看出现频次：fetchSize 遍布多天但照样是关键线索
         term.set(t, (term.get(t) || 0) + 1);
       } else if (idf > 0.3) {
         han.set(t, (han.get(t) || 0) + idf * Math.min(t.length, 4));
@@ -87,7 +87,7 @@ function topKeywords(dayEvents, allEvents) {
   const hans = [...han.entries()].sort((a, b) => b[1] - a[1])
     .slice(0, 12).map((x) => x[0]);
 
-  // 全局术语层：libtprt 今天 110 次、明天可能 0 次，只按当日生成就跨天召不回。
+  // 全局术语层：某个术语今天出现 110 次、明天可能 0 次，只按当日生成就跨天召不回。
   // 累计全量频次取 top 24，跟当日术语一起写进摘要。
   const globalTerm = new Map();
   for (const ev of allEvents) {

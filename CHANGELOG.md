@@ -17,6 +17,35 @@
 
 ---
 
+## [0.1.1] - 2026-11-11
+
+### 新增
+
+- **`tools/bench.mjs`** —— 检索质量基准。自带四天夹具（JDBC 连接池排查过程），33 条查询分七类（term / cn / multi / cross / evo / hist / neg），不读任何真实数据。CI 里跑。
+- **`tools/selftest.mjs`** —— 干净环境自检。造最小流水，从零加载插件，15 项接口检查。校验规则照抄 Cordis 与 DSH 源码。
+- **README** 新增四节：「装完是空的，得先喂数据」「JavaScript API」「验证它能不能跑」「它依赖宿主的哪些能力」「检索质量基准」。
+
+### 变更
+
+- **`src/digest.js` 全部改成对象参数**（BREAKING）。九个函数不再位置传参：
+  `buildDailies(m, d)` → `buildDailies({ memDir, digestDir })`，其余同理。
+  `expandRange(spec)` 和 `makeMatcher(pattern)` 只有一个参数，保持不动。
+  老签名调用会立刻抛 `TypeError` 并提示正确写法，不做静默兼容 —— 两套并存会让人猜不透该用哪个。
+- 补全十个导出函数的 JSDoc，标清每个参数是流水目录还是摘要目录、返回的是对象还是字符串。
+
+### 修复
+
+- **补 `export const name`** —— Cordis 用它做 fiber 标签，缺了日志里看不到是谁。
+- **`tools/memory-notes.mjs` 的输出路径和插件 `memDir()` 对齐**。之前一边写 `~/.dsh/memory-notes` 一边读 `D:\memory`，新用户装完永远是空索引。
+- **去掉 `D:\memory` 兜底**：node 写非系统盘可能 `EPERM`（实测 DSH 自带 node 运行时就这样，同目录 PowerShell 却能写）。默认走 `<DSH_HOME>/memory`，要放 D 盘得显式设 `DSH_MEMORY_DIR`。
+- **跑之前探测可写性**，不可写当场报错并建议换目录，不跑到一半才崩。
+- **`sessions` 目录不存在时提示后正常退出**，不抛 `ENOENT`。
+
+### 已知问题
+
+- 检索精确率 70.5%：返回的前十条里约三成片段跟查询词不完全对得上。这是加权 OR 的固有代价，改法见 Unreleased。
+
+---
 ## [0.1.0] - 2026-11-11
 
 第一个能用的版本。

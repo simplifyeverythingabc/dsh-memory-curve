@@ -247,7 +247,7 @@ export function apply(ctx, config = {}) {
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
-          pattern: { type: 'string', description: '关键词或正则，如 0x7db4、libtprt、悬浮窗' },
+          pattern: { type: 'string', description: '关键词或正则，如 maxWait、fetchSize、连接池' },
           maxHits: { type: 'integer', description: '最多返回几条，默认 20' },
         },
         required: ['pattern'],
