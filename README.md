@@ -124,10 +124,13 @@ node tools/memory-notes.mjs
 |---|---|---|
 | 1 | `DSH_MEMORY_DIR` | 推荐显式设成这个 |
 | 2 | `MEMORY_GALAXY_DIR` | 早期从 dsh-memory-galaxy 借的变量，保留兼容 |
-| 3 | `D:\memory` | Windows 老位置，**存在才用** |
-| 4 | `<DSH_HOME>/memory` | 跨平台默认值 |
+| 3 | `<DSH_HOME>/memory` | 默认值 |
 
 默认 `<DSH_HOME>` 是 `~/.dsh`。所以什么都不设的话，流水会落在 `~/.dsh/memory/`。
+
+**为什么默认不往 `D:\memory` 写**：某些环境下 node 进程被限制，写非系统盘会 `EPERM`——实测 DSH 自带的 node 运行时就是这样，同一目录下 PowerShell 却能正常写。与其赌，不如默认走一定可写的位置。真要放 D 盘，显式设 `DSH_MEMORY_DIR=D:\memory`。
+
+脚本跑之前会先探测目标目录可不可写，不可写就当场报错并给出换目录的建议，不会跑到一半才崩。会话日志目录不存在时也只是提示一句然后正常退出（退出码 0），不抛异常。
 
 **为什么不自动采集**：记忆是私密的。采哪些会话、留多久、写到哪里，应该由你决定，不该由插件替你决定。
 

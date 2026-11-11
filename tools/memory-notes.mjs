@@ -32,19 +32,37 @@ const SESSIONS = path.join(DSH_HOME, 'sessions');
 // 优先级和 memDir() 保持一致：
 //   1. DSH_MEMORY_DIR
 //   2. MEMORY_GALAXY_DIR（兼容旧的）
-//   3. D:\memory（Windows 老位置，存在就用）
-//   4. <DSH_HOME>/memory
+//   3. <DSH_HOME>/memory      ← 默认
+//
+// 注意：这里故意不往 D:\memory 兜底。某些环境下 node 进程被限制，写非系统盘会
+// EPERM（实测 DSH 自带的 node 运行时就是这样，同目录 PowerShell 却能写）。
+// 想要 D:\memory 就显式设 DSH_MEMORY_DIR，让使用者自己承担这个选择。
 function resolveMemDir() {
   const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
   if (explicit) return explicit;
-  const legacy = 'D:\\memory';
-  try {
-    if (fs.existsSync(legacy)) return legacy;
-  } catch { /* 无权限时忽略 */ }
   return path.join(DSH_HOME, 'memory');
 }
 
 const OUT = resolveMemDir();
+
+// 提前探测可写性，别等跑到一半才 EPERM
+function assertWritable(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.write-probe-${process.pid}`);
+    fs.writeFileSync(probe, 'ok');
+    fs.unlinkSync(probe);
+  } catch (err) {
+    console.error(`流水目录不可写：${dir}`);
+    console.error(`  ${err.code}: ${err.message}`);
+    console.error('');
+    console.error('换一个可写的位置再跑，例如：');
+    console.error('  DSH_MEMORY_DIR=<可写目录> node tools/memory-notes.mjs');
+    process.exit(1);
+  }
+}
+
+assertWritable(OUT);
 
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 // 完整记忆优先：不设实质上限（星系单文件上限是 6MB，远没到）。
@@ -89,6 +107,11 @@ function textOf(content) {
 const byDay = new Map();   // '2026-11-04' -> [{t, role, text}]
 
 function collect(dir) {
+  if (!fs.existsSync(dir)) {
+    console.warn(`会话日志目录不存在：${dir}`);
+    console.warn('  DSH 至少跑过一次对话之后，这里才会有 .zstd 文件。');
+    return;
+  }
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) { collect(full); continue; }
