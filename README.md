@@ -208,6 +208,57 @@ MC_SELFTEST_ROOT=/path/to/writable node tools/selftest.mjs
 ```
 
 注意这只是**模拟宿主**——用最小的 `ctx` 对象替代真实的 DSH。它能证明插件本身逻辑没问题，但证明不了跟真宿主的接口完全对得上。真装一遍才算数。
+## 它依赖宿主的哪些能力
+
+自检脚本里的「假宿主」不是随手写的空壳，校验规则全部照抄 Cordis 和 DSH 的真实实现。下面这些是插件的硬依赖，缺一个就跑不起来：
+
+**`ctx.effect(execute, label = 'anonymous')`**
+
+`execute` 无参数调用，返回值可以是四种之一：
+
+```ts
+type Disposable = () => any
+type SyncEffect  = Disposable | Iterable<Disposable>
+type AsyncEffect = Promise<Disposable> | AsyncIterable<Disposable>
+```
+
+Cordis 把它们全部收进 `disposables`，卸载时**反序执行**，而且每个 disposer 只跑一次（内部有 `disposing` 标志）。调用前会 `assertActive()`，fiber 处于 `UNLOADING` 时直接抛 `CordisError('INACTIVE_EFFECT')`。
+
+本插件在这个通道里注册两样东西：`memory-curve-index` 这个 context，和一个兼容用的 `memory_curve` 变量。返回的都是单个 disposer 函数。
+
+**`ctx.systemPrompt.context(definition)`**
+
+硬校验，缺一个就抛 `TypeError`：
+
+| 字段 | 要求 |
+|---|---|
+| `order` | 必须是有限数字（`Number.isFinite`） |
+| `name` | 必须是非空字符串 |
+| `text` | 字符串或函数；函数每步重新求值 |
+| `interpolate` | 设 `false` 绕过变量解析 |
+
+本插件用 `order: 900`，`text` 是函数（每步重读磁盘），`interpolate: false`。
+
+**`ctx.tools.register(definition, options)`**
+
+同样硬校验：
+
+| 检查 | 后果 |
+|---|---|
+| `output` 必须是对象 | 否则 `TypeError` |
+| `output.render` 必须是函数 | 否则 `TypeError` |
+| `output.presentationMeta` 若存在必须是函数 | 否则 `TypeError` |
+| `name` 必须是非空字符串 | 否则 `TypeError` |
+
+返回的是「注销这个工具」的 disposer。第二个参数 `options.when` 是逐步骤的启用条件，本插件没用到。
+
+**插件本体的三个导出**
+
+| 导出 | 必需 | 说明 |
+|---|---|---|
+| `name` | 建议 | Cordis 用它做 fiber 标签，缺了日志里看不到是谁 |
+| `inject` | 是 | 声明依赖的服务，本插件要 `['systemPrompt', 'tools']` |
+| `apply` | 是 | `apply(ctx, config)`，插件入口 |
 ## 已知限制
 
 **一、Windows 特有**

@@ -86,14 +86,37 @@ try {
   const contexts = [];
   const effects = [];
   const disposers = [];
+  const pendingAsync = [];
 
   let contextSeq = 0;
   const ctx = {
-    // 真签名：effect(callback, label)，callback 返回 disposer
-    effect(callback, label) {
-      effects.push(label || `effect-${effects.length}`);
-      const inner = callback();
-      const dispose = typeof inner === 'function' ? inner : () => {};
+    // 真签名：effect(execute, label = 'anonymous')
+    // execute 无参数调用，返回值可以是四种之一：
+    //   单个 disposer / 迭代器（每个 yield 一个 disposer）/ Promise<disposer> / 异步迭代器
+    // 真实现全部收集到 disposables，卸载时反序执行，且只执行一次（disposing 标志）
+    effect(execute, label = 'anonymous') {
+      if (typeof execute !== 'function') {
+        throw new TypeError('effect execute must be a function');
+      }
+      effects.push(label);
+      const collected = [];
+      const collect = (d) => { if (typeof d === 'function') collected.push(d); };
+
+      const raw = execute();
+      if (raw && typeof raw[Symbol.iterator] === 'function' && typeof raw !== 'function') {
+        for (const d of raw) collect(d);
+      } else if (raw && typeof raw.then === 'function') {
+        pendingAsync.push(Promise.resolve(raw).then(collect));
+      } else {
+        collect(raw);
+      }
+
+      let disposing = false;
+      const dispose = () => {
+        if (disposing) return;
+        disposing = true;
+        for (const d of collected.splice(0).reverse()) d();
+      };
       disposers.push(dispose);
       return dispose;
     },
