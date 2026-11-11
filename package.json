@@ -1,0 +1,39 @@
+{
+  "name": "dsh-memory-curve",
+  "version": "0.1.0",
+  "description": "按艾宾浩斯遗忘曲线给记忆事件分级：高留存的进上下文，低留存的只留文件。完整记忆仍在 D:\\memory，上下文只吃事件标题（975 条 → 400 余字）。",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.js",
+    "./events": "./src/events.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "main": "./src/index.js",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "memory",
+    "ebbinghaus",
+    "forgetting-curve"
+  ],
+  "dsh-plugin": {
+    "category": "memory",
+    "displayName": "记忆事件分级（遗忘曲线）"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

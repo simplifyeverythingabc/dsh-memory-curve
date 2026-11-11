@@ -1,0 +1,15 @@
+# dsh-memory-curve bundle patch
+#
+# 往宿主组合里插一行 dsh-memory-curve：把「按遗忘曲线分级后的事件索引」
+# 注册成提示变量 memory_curve（读），并注册两个工具（写/查）。
+#
+# 完整记忆不在这里 —— 它一直留在 D:\memory\YYYY-MM-DD.md。
+# 这一行只负责把 975 条对话压成 400 余字的标题，喂进系统提示。
+- insert:
+    - id: memory-curve
+      name: dsh-memory-curve
+      config:
+        # 各级最多列几条，控制注入体积。调大更全但更占上下文。
+        maxL1: 12
+        maxL2: 20
+        maxL3: 8

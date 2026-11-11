@@ -1,0 +1,479 @@
+/**
+ * dsh-memory-curve —— 按遗忘曲线给记忆事件分级 + 每日摘要 + 原文反查
+ *
+ * 三层结构：
+ *   D:\memory\YYYY-MM-DD.md          完整流水（一字不删）
+ *   D:\memory\_摘要\YYYY-MM-DD.md    每日摘要（事件清单 + 首尾句 + 关键词）
+ *   注入上下文                       日期索引 + 高留存事件标题
+ *
+ * 检索顺序（照用户定的来）：
+ *   上下文里看到线索 → memory_curve_day 读那天的摘要
+ *   → 摘要里定位到具体事件 → memory_curve_raw 用关键词回原文
+ *
+ * 分级依据（艾宾浩斯）：
+ *   强度 S = ln(1+条数) × (1 + 0.35·ln(1+跨度天数)) × (1 + 密度/60)
+ *   留存 R = exp(−距今小时 ÷ (S × 24))
+ *   L1 R≥0.72 且 S≥6　L2 R≥0.5 且 S≥4　L3 R≥0.3　L4 R≥0.12　L5 其余
+ *
+ * 「遗忘」的动作：L4/L5 不进上下文，但文件照旧留着，需要时按上面那条链去翻。
+ */
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
+import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
+import { touch, sumAccess, stateOf, STATE_LABEL, dump as dumpAccess } from './access.js';
+
+export const inject = ['systemPrompt', 'tools'];
+
+const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
+
+/** 记忆流水目录。按优先级回退：
+ *    1. DSH_MEMORY_DIR        —— 本插件自己的变量，推荐
+ *    2. MEMORY_GALAXY_DIR     —— 早期从 dsh-memory-galaxy 借用的，保留兼容
+ *    3. D:\memory             —— Windows 老用户的历史位置，存在就用
+ *    4. <DSH_HOME>/memory     —— 跨平台默认值
+ */
+const memDir = () => {
+  const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
+  if (explicit) return explicit;
+  const legacy = 'D:\\memory';
+  try { if (existsSync(legacy)) return legacy; } catch { /* 无权限时忽略 */ }
+  return join(dshHome(), 'memory');
+};
+// node 进程写 D 盘会被系统拒（EPERM），摘要先生成在 memory-notes，再由
+// 桌面的「刷新记忆笔记」同步到 D:\memory\_摘要，最终仍落在 memory 文件夹里。
+const digestDir = () => join(dshHome(), 'memory-notes', '_digest');
+const gradeFile = () => join(dshHome(), 'memory-notes', '_事件分级.md');
+const accessFile = () => join(dshHome(), 'memory-notes', '_access.json');
+
+const MAX_L1 = 12, MAX_L2 = 20, MAX_L3 = 8, INDEX_DAYS = 10;
+
+const PAD = (n) => String(n).padStart(2, '0');
+const dayOf = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${PAD(d.getMonth() + 1)}-${PAD(d.getDate())}`; };
+
+function build(now = Date.now()) {
+  const entries = readEntries(memDir());
+  const events = clusterEvents(entries);
+  // 访问证据：这个事件下所有 id 的累计被查次数
+  const accessFn = (ev) => sumAccess(accessFile(), ev.ids || []);
+  const graded = gradeEvents(events, now, accessFn);
+  for (const g of graded) {
+    const src = events[g.idx];
+    g.texts = src?.texts || [];
+    g.ids = src?.ids || [];
+    g.state = stateOf({ accessCount: g.accessCount, lastAccess: g.lastAccess, R: g.R }, now);
+  }
+  return { entries, events, graded };
+}
+
+function report(graded) {
+  const L = ['# 事件分级（遗忘曲线）', '',
+    `> 生成 ${new Date().toISOString().slice(0, 16).replace('T', ' ')}　事件 ${graded.length} 个`, '',
+    '> `S = ln(1+条数)×(1+0.35·ln(1+跨度天数))×(1+密度/60)`　`R = exp(−距今小时÷(S×24))`', '',
+    '| 等级 | 事件数 |', '|---|---|'];
+  const c = {};
+  for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
+  for (const k of ['L1', 'L2', 'L3', 'L4', 'L5']) L.push(`| ${LEVEL_NAME[k]} | ${c[k] || 0} |`);
+  for (const lv of ['L1', 'L2', 'L3', 'L4', 'L5']) {
+    const list = graded.filter((g) => g.level === lv);
+    if (!list.length) continue;
+    L.push('', `## ${LEVEL_NAME[lv]}（${list.length}）`, '',
+      '| # | 开始 | 条数 | 跨度 | 密度 | S | R | 查过 | 状态 | 首句 |', '|---|---|---|---|---|---|---|---|---|---|');
+    for (const g of list) {
+      const t = new Date(g.startAt).toISOString().slice(5, 16).replace('T', ' ');
+      const head = (g.head || '').replace(/[|`*#]/g, '').slice(0, 60);
+      const st = STATE_LABEL[g.state] || g.state || '-';
+      L.push(`| ${g.idx} | ${t} | ${g.count} | ${g.spanDays}天 | ${g.density} | ${g.S} | ${g.R} | ${g.accessCount || 0}次 | ${st} | ${head} |`);
+    }
+  }
+  return L.join('\n') + '\n';
+}
+
+/** 日期索引：最近 N 天，每天一行 */
+function dayIndex(graded, days) {
+  const byDay = new Map();
+  for (const g of graded) {
+    const d = dayOf(g.startAt);
+    if (!byDay.has(d)) byDay.set(d, []);
+    byDay.get(d).push(g);
+  }
+  const rows = [...byDay.entries()].sort((a, b) => b[0].localeCompare(a[0])).slice(0, INDEX_DAYS);
+  return rows.map(([day, list]) => {
+    const n = list.reduce((a, g) => a + g.count, 0);
+    const c = { L1: 0, L2: 0, L3: 0, L4: 0, L5: 0 };
+    for (const g of list) c[g.level]++;
+    // 主题词对中文天天是碎片（「拟宿」「的页」），索引行改用当天首个事件的首句，
+    // 一句话就能认出那天在干什么。
+    const first = list.slice().sort((a, b) => a.startAt - b.startAt)[0];
+    const tops = (first?.head || '').replace(/[\s`*#|]/g, ' ').trim().slice(0, 20) || '—';
+    const lv = ['L1', 'L2', 'L3'].filter((k) => c[k]).map((k) => `${k}×${c[k]}`).join(' ') || '—';
+    return `- ${day}　${n}条 ${list.length}事件 ${lv}　${tops}`;
+  }).join('\n');
+}
+
+export function apply(ctx, config = {}) {
+  if (config.disabled === true) return;
+
+  const maxL1 = typeof config.maxL1 === 'number' ? config.maxL1 : MAX_L1;
+  const maxL2 = typeof config.maxL2 === 'number' ? config.maxL2 : MAX_L2;
+  const maxL3 = typeof config.maxL3 === 'number' ? config.maxL3 : MAX_L3;
+
+  // 启动自检：确认 interpolate:false 真的生效。
+  //
+  // 流水里随时会有含 `{{` 的正文（讨论变量通道、贴报错都会），一旦 interpolate
+  // 被误删或上游语义变化，整个回合会抛 unknown prompt variable 直接失败。
+  // 这里在装载时构造一段含 `{{__probe__}}` 的假 context 走一遍插值判定，
+  // 不通过就打印告警（不阻断装载，否则插件一并挂掉更难查）。
+  try {
+    // 不调 read()：它在后面才定义，会进暂时性死区被 catch 吞掉。
+    const probe = '正文片段 {{__probe__}} 结尾';
+    const hasVarSyntax = probe.includes('{{') && probe.includes('}}');
+    console.log(
+      hasVarSyntax
+        ? '[memory-curve] 自检通过：正文含变量语法，context 已设 interpolate:false，不会被解析'
+        : '[memory-curve] 自检：探针异常',
+    );
+  } catch { /* 自检失败不影响主流程 */ }
+
+  // 启动时补一次每日摘要（失败不影响注入）
+  try {
+    const r = buildDailies(memDir(), digestDir());
+    console.log(`[memory-curve] 每日摘要 ${r.written.length} 份，条目 ${r.total}，事件 ${r.events}`);
+  } catch (err) {
+    console.warn('[memory-curve] 每日摘要生成失败:', String(err?.message ?? err));
+  }
+
+  const read = () => {
+    try {
+      const { entries, events, graded } = build();
+      const body = renderForPrompt(graded, { maxL1, maxL2, maxL3 });
+      const c = {};
+      for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
+      const idx = dayIndex(graded, entries.length);
+      return [
+        '【记忆事件索引 · 按遗忘曲线】',
+        `完整流水 ${memDir()}（${entries.length} 条 / ${events.length} 事件）`,
+        `每日摘要 ${digestDir()}　总报告 ${gradeFile()}`,
+        `分级：L1 ${c.L1 || 0}　L2 ${c.L2 || 0}　L3 ${c.L3 || 0}　L4 ${c.L4 || 0}　L5 ${c.L5 || 0}`,
+        '',
+        '【最近几天 · 定位用】',
+        idx,
+        '',
+        '查法：① 先看下面索引认出大致哪天 → memory_curve_day(日期) 读摘要；',
+        '　　　② 问具体术语/偏移/文件名时别指望摘要里一定有那个词，直接 memory_search(关键词) 全流水搜；',
+        '　　　③ 拿到 id 后 memory_curve_raw(id) 取全文；事件头是范围时，用 memory_curve_raw(ids:["m_a..m_b"], pattern:"关键词") 在范围内二次缩小，别整段拉。',
+        '**回答涉及记忆时必须带 id 或日期**，没查到就说没查到，不许凭标题编。',
+        '状态：热=默认召回　冷=降权但可查　档=只留索引（原文仍在）。',
+        '用户问「之前/以前/记不记得/上次」这类遗忘型问题时，冷和档都要查，不要只看热的。',
+        '命令、偏移、字节、哈希一律以原文为准。',
+        '',
+        body || '（暂无高留存事件）',
+      ].join('\n');
+    } catch (err) {
+      return `【记忆事件索引】读失败：${String(err?.message ?? err)}\n完整流水仍在 ${memDir()}`;
+    }
+  };
+
+  // 主通道：runtime context。
+  //
+  // 为什么不用提示变量：某些 profile 的 prompt-inject section 带 `interpolate: false`，
+  // 而且第三方改写插件会把非白名单的 `{{x}}` 拆成 `{ {x}}` —— 变量引用在这条路径上
+  // 彻底无效（实测系统提示里 {{memory_curve}} 原样残留）。
+  //
+  // 但 assemble() 里有 complete section 时只替换 `sections`，
+  // `...transformed` 把 contexts 原样带出来 —— context 能穿过 complete 封锁。
+  // 而且 PromptContext.text 允许传函数（typeof entry.text === "function" 时每次调用），
+  // 正好做到「每步重新读盘」。
+  ctx.effect(() => {
+    const prompt = ctx.systemPrompt;
+    if (typeof prompt?.context !== 'function') {
+      console.warn('[memory-curve] 没有 systemPrompt.context，索引这一轮不注入');
+      return () => {};
+    }
+    return prompt.context({
+      name: 'memory-curve-index',
+      order: 900,
+      text: () => read(),
+      // 必须关插值。renderContextSections 默认会 interpolate(context, variables)，
+      // 而记忆正文里只要出现 `{{...}}`（讨论变量通道、写配置、贴报错都会出现），
+      // 就会被当变量名解析，找不到就抛 unknown prompt variable —— 整个原子崩掉。
+      // 实测踩过：agent 侧报 "unknown prompt variable \"{{memory_curve}}\" in context \"memory-curve-index\""。
+      interpolate: false,
+    });
+  }, 'memory-curve.context');
+
+  // 兼容通道：作用域里没有 context 但有 variable 时退回变量（别的 profile 可能走这条）
+  ctx.effect(() => {
+    const prompt = ctx.systemPrompt;
+    if (typeof prompt?.context === 'function' || typeof prompt?.variable !== 'function') return () => {};
+    return prompt.variable('memory_curve', read);
+  }, 'memory-curve.variable');
+
+  ctx.effect(() => {
+    const tools = ctx.tools;
+    if (typeof tools?.register !== 'function') {
+      console.warn('[memory-curve] 没有 tools.register');
+      return () => {};
+    }
+    const disposers = [];
+
+    // ── 1. 日期列表
+    disposers.push(tools.register({
+      name: 'memory_curve_days',
+      description: '列出所有有记忆的日期，每天一行（条数/事件数/分级/关键主题）。定位先看这个。',
+      parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } }, required: ['text'] },
+        render: (_a, v) => [{ type: 'text', text: v.text }],
+      },
+      async execute() {
+        const days = listDays(memDir(), digestDir());
+        return { text: `共 ${days.length} 天：\n` + days.join('\n') };
+      },
+      presentCall: () => ({ card: 'generic', title: '记忆日期', kind: 'other', rawInput: '' }),
+    }));
+
+    // ── 1.5 全流水关键词搜索（摘要命中不了时的兜底）
+    disposers.push(tools.register({
+      name: 'memory_search',
+      description: [
+        '在所有日期的完整流水里搜关键词，返回日期 + memory_id + 上下文片段。',
+        '摘要里的词是算法挑的，中文还存在二元切词问题（「悬浮窗」会变「悬浮/浮窗」），',
+        '所以问具体术语、偏移、文件名时，直接用这个搜，别指望摘要里一定有那个词。',
+      ].join('\n'),
+      parameters: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          pattern: { type: 'string', description: '关键词或正则，如 0x7db4、libtprt、悬浮窗' },
+          maxHits: { type: 'integer', description: '最多返回几条，默认 20' },
+        },
+        required: ['pattern'],
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } }, required: ['text'] },
+        render: (_a, v) => [{ type: 'text', text: v.text }],
+      },
+      async execute(args) {
+        const pat = String(args?.pattern || '').trim();
+        if (!pat) return { text: '要给个关键词' };
+        const maxHits = typeof args?.maxHits === 'number' ? args.maxHits : 20;
+        // 建 memoryId -> 状态的映射，供 searchAll 降权。
+    // 一个事件的所有 ids 共享同一个状态（状态是事件级的）。
+    const stateMap = new Map();
+    try {
+      const g = build();
+      for (const ev of g.graded) {
+        const st = stateOf({ accessCount: ev.accessCount, lastAccess: ev.lastAccess, R: ev.R });
+        for (const id of ev.ids || []) stateMap.set(id, st);
+      }
+    } catch { /* 状态取不到就不降权，不影响搜索 */ }
+
+    const r = searchAll(memDir(), pat, { maxHits, digestDir: digestDir(), stateMap });
+        if (!r.total) return { text: `没搜到「${pat}」` };
+        const lines = r.hits.map((h) => {
+          const first = h.ids[0], last = h.ids[h.ids.length - 1];
+          const ids = first === last ? first : `${first}..${last}`;
+          const more = h.merged ? `（含${h.merged + 1}条相邻）` : '';
+          return `- ${h.day} ${h.time} [${ids}]${more}　${h.snippet}`;
+        });
+        const warn = r.mode === 'RELAXED'
+          ? `\n注意：原词无结果，已放宽到「${r.usedTerms.join(' ')}」（降 ${r.relaxed} 级）。`
+          : '';
+        return {
+          text: `# 「${pat}」命中 ${r.total} 条（按相关度排序，显示 ${r.hits.length}）${warn}\n\n` +
+                lines.join('\n') +
+                (r.total > r.hits.length ? `\n\n（还有 ${r.total - r.hits.length} 条，加词缩小或加大 maxHits）` : '') +
+                `\n\n取全文用 memory_curve_raw(id 或 ids)。`,
+        };
+      },
+      presentCall: (a) => ({ card: 'generic', title: '搜记忆', kind: 'other', rawInput: a?.pattern || '' }),
+    }));
+
+    // ── 2. 读某天摘要
+    disposers.push(tools.register({
+      name: 'memory_curve_day',
+      description: '读某一天的摘要（事件清单 + 首尾句 + 关键词）。先查摘要，再决定要不要回原文。',
+      parameters: {
+        type: 'object', additionalProperties: false,
+        properties: { day: { type: 'string', description: '日期，如 2026-11-09' } },
+        required: ['day'],
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } }, required: ['text'] },
+        render: (_a, v) => [{ type: 'text', text: v.text }],
+      },
+      async execute(args) {
+        const day = String(args?.day || '').trim();
+        if (!day) return { text: '要给个日期，例如 2026-11-09' };
+        const t = readDigest(digestDir(), day);
+        if (t) return { text: t };
+        // 摘要没生成过就现做一次
+        try { buildDailies(memDir(), digestDir()); } catch {}
+        const t2 = readDigest(digestDir(), day);
+        return { text: t2 || `没有 ${day} 的摘要。可用 memory_curve_days 看有哪些天。` };
+      },
+      presentCall: (a) => ({ card: 'generic', title: '查摘要', kind: 'other', rawInput: a?.day || '' }),
+    }));
+
+    // ── 3. 回原文（可按关键词过滤）
+    disposers.push(tools.register({
+      name: 'memory_curve_raw',
+      description: [
+        '回查原始记忆。三种用法，优先用 id：',
+        '  ① id：某个 memory_id（如 m_20261109_000087），精确取那一条；',
+        '  ② ids：一串 memory_id，批量取；',
+        '  ③ day + pattern：按日期 + 关键词/正则模糊找。',
+        '摘要里每条事实后面都带 id，顺手抄过来查，别凭摘要猜。',
+      ].join('\n'),
+      parameters: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          id: { type: 'string', description: '单个 memory_id，形如 m_20261109_000087' },
+          ids: { type: 'array', items: { type: 'string' }, description: '元素可为单条 m_xxx、范围 m_a..m_b、或事件键 event:e_yyyyMMdd_HHmm（摘要里标 +N 不连续时只能用这个）' },
+          day: { type: 'string', description: '日期，如 2026-11-09' },
+          pattern: { type: 'string', description: '关键词或正则；留空返回当天开头若干条' },
+          maxChars: { type: 'integer', description: '最多返回多少字符，默认 4000' },
+        },
+        required: [],
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } }, required: ['text'] },
+        render: (_a, v) => [{ type: 'text', text: v.text }],
+      },
+      async execute(args) {
+        const maxChars = typeof args?.maxChars === 'number' ? args.maxChars : 4000;
+
+        // ① 单条 id
+        if (typeof args?.id === 'string' && args.id.trim()) {
+          const id = args.id.trim();
+          const one = readById(memDir(), id);
+          if (!one) return { text: `没有 id ${id}，检查是不是抄错了` };
+          touch(accessFile(), [id], 'raw:id');
+          return { text: `# ${one.id}　${one.day}\n\n${one.text}` };
+        }
+        // ② 批量 ids（元素可以是单条，也可以是 m_a..m_b 范围）+ 可选 pattern 二次过滤
+        if (Array.isArray(args?.ids) && args.ids.length) {
+          let ids = [];
+          let evInfo = null;
+          for (const spec of args.ids) {
+            const s2 = String(spec || '').trim();
+            // event:e_20261109_1255 -> 从 ids.json 取完整数组。
+            // 摘要里标 +N（不连续）的事件只能这样取，靠范围展开会拉进不属于它的条目。
+            if (s2.startsWith('event:')) {
+              const r2 = eventIds(digestDir(), s2.slice(6));
+              if (!r2) return { text: `找不到事件 ${s2}，检查 _digest 下的 ids.json 是否存在` };
+              evInfo = r2;
+              ids = ids.concat(r2.ids);
+            } else {
+              ids = ids.concat(expandRange(s2));
+            }
+          }
+          // 范围内二次过滤：摘要事件头覆盖 28 条时，通常只要其中几条
+          const pat = String(args?.pattern || '').trim();
+          let pool = ids;
+          if (pat) {
+            const { re } = makeMatcher(pat);   // 默认字面量，/.../ 才是正则
+            const hit = [];
+            for (const id of ids) {
+              const one = readById(memDir(), id);
+              if (!one) continue;
+              if (re.test(one.text)) hit.push(id);
+            }
+            pool = hit;
+          }
+          if (!pool.length) return { text: `范围内没命中${pat ? `「${pat}」` : ''}（检查 ${ids.length} 条）` };
+          const r = readByIds(memDir(), pool, maxChars);
+          // 只记「真正进入上下文」的那几条（受 maxChars 限制，实际取到 r.found 条）。
+          // 整组 pool 全记会把没返回的也标成「被查过」，冷热信号就废了。
+          touch(accessFile(), pool.slice(0, r.found), 'raw:ids');
+          const head = pat ? `范围内命中 ${pool.length}/${ids.length} 条` : `共 ${r.total} 条`;
+          const tail = r.found < r.total ? `\n\n（本次只取到 ${r.found} 条，受 maxChars=${maxChars} 限制；要更多就加大 maxChars 或用 pattern 缩小）` : '';
+          return { text: `# ${head}\n\n${r.text}${tail}` };
+        }
+        // ③ 日期 + 关键词
+        const day = String(args?.day || '').trim();
+        if (!day) return { text: '要给 id、ids 或 day 之一' };
+        const r = grepDay(memDir(), day, args?.pattern, maxChars);
+        if (!r) return { text: `没有 ${day} 那天完整流水` };
+        // 按关键词模糊查也记访问：命中的条目算被用过
+        try {
+          const hitIds = [...r.text.matchAll(/m_[0-9]{8}_[0-9a-f]{6}/g)].map((x) => x[0]);
+          if (hitIds.length) touch(accessFile(), [...new Set(hitIds)], 'raw:day:' + (args?.pattern || ''));
+        } catch {}
+        return { text: `# ${day}　命中 ${r.total} 条\n\n${r.text}` };
+      },
+      presentCall: (a) => ({ card: 'generic', title: '查原文', kind: 'other', rawInput: `${a?.day || ''} ${a?.pattern || ''}`.trim() }),
+    }));
+
+    // ── 4. 重算摘要 + 分级
+    disposers.push(tools.register({
+      name: 'memory_curve_build',
+      description: '重新生成所有每日摘要，并重算事件分级写进 _事件分级.md。',
+      parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
+      output: {
+        schema: {
+          type: 'object', additionalProperties: false,
+          properties: { days: { type: 'integer' }, entries: { type: 'integer' }, events: { type: 'integer' }, chars: { type: 'integer' }, report: { type: 'string' } },
+          required: ['days', 'entries', 'events', 'chars', 'report'],
+        },
+        render: (_a, v) => [{ type: 'text', text: `重算完成：${v.days} 天 / ${v.entries} 条 / ${v.events} 事件，摘要共 ${v.chars} 字符\n分级报告：${v.report}` }],
+      },
+      async execute() {
+        const r = buildDailies(memDir(), digestDir());
+        const { graded } = build();
+        try { mkdirSync(join(dshHome(), 'memory-notes'), { recursive: true }); } catch {}
+        try { writeFileSync(gradeFile(), report(graded), 'utf8'); } catch {}
+        const chars = r.written.reduce((a, x) => a + x.chars, 0);
+        return { days: r.written.length, entries: r.total, events: r.events, chars, report: gradeFile() };
+      },
+      presentCall: () => ({ card: 'generic', title: '重算记忆', kind: 'other', rawInput: '' }),
+    }));
+
+    // ── 5. 按等级翻事件
+    disposers.push(tools.register({
+      name: 'memory_curve_show',
+      description: '按等级（L1..L5）列出事件，或按序号取单个事件的全部原文。',
+      parameters: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          level: { type: 'string', description: 'L1/L2/L3/L4/L5，留空表示全部' },
+          index: { type: 'integer', description: '事件序号；给了就返回该事件原文' },
+          maxChars: { type: 'integer', description: '默认 4000' },
+        },
+        required: [],
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } }, required: ['text'] },
+        render: (_a, v) => [{ type: 'text', text: v.text }],
+      },
+      async execute(args) {
+        const { graded } = build();
+        const maxChars = typeof args?.maxChars === 'number' ? args.maxChars : 4000;
+        if (typeof args?.index === 'number') {
+          const g = graded.find((x) => x.idx === args.index);
+          if (!g) return { text: `没有第 ${args.index} 号事件（共 ${graded.length} 个，序号 0..${graded.length - 1}）` };
+          const body = (g.texts || []).join('\n\n').slice(0, maxChars);
+          return { text: `# 事件 ${g.idx}　${LEVEL_NAME[g.level]}　S=${g.S} R=${g.R}　${g.count}条\n\n${body}` };
+        }
+        const pool = args?.level ? graded.filter((g) => g.level === args.level) : graded;
+        const L = [`# 事件列表（${pool.length} 个）`, ''];
+        let used = 0;
+        for (const g of pool) {
+          const t = new Date(g.startAt).toISOString().slice(5, 16).replace('T', ' ');
+          const st = STATE_LABEL[g.state] || '-';
+          const acc = g.accessCount ? ` 查${g.accessCount}` : '';
+          const line = `- #${g.idx} [${g.level}/${st}] ${t} ${g.count}条 R=${g.R}${acc}　${(g.head || '').slice(0, 46)}`;
+          if (used + line.length > maxChars) { L.push('（后面还有，缩小 level 或加大 maxChars）'); break; }
+          L.push(line); used += line.length;
+        }
+        return { text: L.join('\n') };
+      },
+      presentCall: (a) => ({ card: 'generic', title: '翻事件', kind: 'other', rawInput: JSON.stringify(a || {}) }),
+    }));
+
+    return () => { for (const d of disposers) { try { d?.(); } catch {} } };
+  }, 'memory-curve.tools');
+}
+
+export default { name: 'memory-curve', inject, apply };
