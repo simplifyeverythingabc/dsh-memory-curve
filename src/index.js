@@ -18,7 +18,7 @@
  * 「遗忘」的动作：L4/L5 不进上下文，但文件照旧留着，需要时按上面那条链去翻。
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
@@ -35,6 +35,41 @@ const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
 /** 由 settings.register() 返回的句柄，apply() 时填入。 */
 let settingsHandle = null;
 
+/** watch 的注销函数，卸载时调用，避免订阅泄漏。 */
+let stopSettingsWatch = null;
+
+/**
+ * 把用户填的路径变成可用的绝对路径。
+ *
+ * 支持几种常见写法，免得用户填 `%USERPROFILE%\memory` 或者 `~/memory`
+ * 之后发现目录建到了奇怪的地方：
+ *   - 前后空白       自动去掉
+ *   - `~` / `~/x`    展开成用户主目录
+ *   - `%VAR%`        展开成环境变量（Windows 习惯）
+ *   - `$VAR`/`${VAR}` 同上（Unix 习惯）
+ *   - 相对路径        按进程当前目录转绝对
+ */
+function normalizeDir(input) {
+  let s = String(input ?? '').trim();
+  if (!s) return '';
+  if (s === '~') s = homedir();
+  else if (s.startsWith('~/') || s.startsWith('~\\')) s = join(homedir(), s.slice(2));
+  s = s.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (m, k) => process.env[k] ?? m);
+  s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+    (m, a, b) => process.env[a ?? b] ?? m);
+  try { return resolve(s); } catch { return s; }
+}
+
+/** 读当前生效的记忆目录（用户显式配置的那份，已规范化）。空串表示没配。 */
+function configuredMemDir() {
+  try {
+    const raw = settingsHandle?.get?.()?.memoryDir;
+    return normalizeDir(raw);
+  } catch {
+    return '';
+  }
+}
+
 /** 记忆流水目录。按优先级回退：
  *    1. 设置界面里填的 memoryDir（用户显式配置，优先级最高）
  *    2. DSH_MEMORY_DIR        —— 环境变量
@@ -43,10 +78,8 @@ let settingsHandle = null;
  *    5. <DSH_HOME>/memory     —— 跨平台默认值
  */
 const memDir = () => {
-  try {
-    const configured = settingsHandle?.get?.()?.memoryDir;
-    if (typeof configured === 'string' && configured.trim()) return configured.trim();
-  } catch { /* settings 读失败就走下面的回退 */ }
+  const configured = configuredMemDir();
+  if (configured) return configured;
   const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
   if (explicit) return explicit;
   const legacy = 'D:\\memory';
@@ -57,12 +90,8 @@ const memDir = () => {
 /** 只在「用户显式配置了路径」时创建它。
  *  没配置就不创建 —— 插件不该在你磁盘上悄悄留东西。 */
 const ensureConfiguredDir = () => {
-  let configured = '';
-  try {
-    configured = settingsHandle?.get?.()?.memoryDir || '';
-  } catch { return; }
-  if (!configured.trim()) return;
-  const dir = configured.trim();
+  const dir = configuredMemDir();
+  if (!dir) return;
   try {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
@@ -72,8 +101,15 @@ const ensureConfiguredDir = () => {
     console.warn(`[memory-curve] 无法创建记忆目录 ${dir}：${err?.message ?? err}`);
   }
 };
-// node 进程写 D 盘会被系统拒（EPERM），摘要先生成在 memory-notes，再由
-// 桌面的「刷新记忆笔记」同步到 D:\memory\_摘要，最终仍落在 memory 文件夹里。
+
+/** 清掉设置句柄和订阅。插件卸载或重新注册前都要走一遍。 */
+function resetSettings() {
+  try { stopSettingsWatch?.(); } catch { /* 忽略 */ }
+  stopSettingsWatch = null;
+  settingsHandle = null;
+}
+
+// 摘要固定在 <DSH_HOME>/memory-notes —— 和流水目录分开，流水可以在任何地方。
 const digestDir = () => join(dshHome(), 'memory-notes', '_digest');
 const gradeFile = () => join(dshHome(), 'memory-notes', '_事件分级.md');
 const accessFile = () => join(dshHome(), 'memory-notes', '_access.json');
@@ -155,31 +191,58 @@ export function apply(ctx, config = {}) {
   // settings 是可选服务，不写进 inject（那样服务缺席会导致整个插件挂起）。
   // ctx.inject() 会在服务就绪时才跑回调，缺席就静默跳过，插件退回
   // 环境变量 / 默认路径那套逻辑，功能不受影响。
+  //
+  // 两个已知边界：
+  //   1. schemastery 只能异步 import，所以 apply 刚返回时 settingsHandle 还是 null，
+  //      本轮首次 build() 会走环境变量/默认路径。下一轮才用设置里的值。
+  //   2. 插件重载时 ctx.inject 会重跑，但 settings 服务那边同名的 registration
+  //      仍然存在（它的 effect 挂在服务上，不随插件卸载），再注册会抛
+  //      "already registered"。所以先查 settingsHandle，有就跳过。
+  let zSchema = null;
+
+  const registerSettings = (sctx) => {
+    if (!zSchema) {
+      console.warn('[memory-curve] schema 未就绪，跳过设置项注册');
+      return;
+    }
+    if (settingsHandle) {           // 重载场景：句柄还在，不重复注册
+      ensureConfiguredDir();
+      return;
+    }
+    settingsHandle = sctx.settings.register('memory-curve', zSchema, {
+      base: { memoryDir: '' },
+      applies: 'live',
+    });
+    ensureConfiguredDir();           // 填了但没建 → 建出来
+    try {
+      const stop = settingsHandle.watch(() => ensureConfiguredDir());
+      stopSettingsWatch = typeof stop === 'function' ? stop : null;
+    } catch (err) {
+      console.warn(`[memory-curve] 监听设置变化失败：${err?.message ?? err}`);
+    }
+    // 清理挂在「插件自己的 ctx」上，不是 sctx ——
+    // sctx 属于 settings 服务，服务重启时会误触发清理，把配置句柄清掉。
+    try { ctx.effect(() => () => resetSettings()); } catch { /* effect 不可用就算了 */ }
+  };
+
   try {
     ctx.inject(['settings'], async (sctx) => {
       try {
-        // schemastery 是 DSH 自带的包；用动态 import 免得静态依赖不存在时
-        // 整个插件加载失败。
-        const mod = await import('@deepseek-ai/schemastery');
-        const z = mod.default ?? mod;
-        if (!z || typeof z.object !== 'function') {
-          console.warn('[memory-curve] schemastery 不可用，跳过设置项');
-          return;
+        if (!zSchema) {
+          // schemastery 是 DSH 自带包；动态 import 免得静态依赖缺失时整个插件挂掉
+          const mod = await import('@deepseek-ai/schemastery');
+          const z = mod.default ?? mod;
+          if (!z || typeof z.object !== 'function') {
+            console.warn('[memory-curve] schemastery 不可用，跳过设置项');
+            return;
+          }
+          zSchema = z.object({
+            memoryDir: z.string().default('').description(
+              '完整记忆存放目录。填了就自动创建；留空则用 DSH_MEMORY_DIR 或 <DSH_HOME>/memory',
+            ),
+          });
         }
-
-        const schema = z.object({
-          memoryDir: z.string().default('').description(
-            '完整记忆存放目录。填了就自动创建；留空则用 DSH_MEMORY_DIR 或 <DSH_HOME>/memory',
-          ),
-        });
-
-        settingsHandle = sctx.settings.register('memory-curve', schema, {
-          base: { memoryDir: '' },
-          applies: 'live',
-        });
-
-        ensureConfiguredDir();                    // 填了但没建 → 建出来
-        settingsHandle.watch(() => ensureConfiguredDir());  // 改完立刻同步
+        registerSettings(sctx);
       } catch (err) {
         console.warn(`[memory-curve] 注册设置项失败（不影响使用）：${err?.message ?? err}`);
       }
