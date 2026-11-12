@@ -26,22 +26,51 @@ import { touch, sumAccess, stateOf, STATE_LABEL, dump as dumpAccess } from './ac
 
 export const name = 'memory-curve';
 
+// settings 不在 inject 里声明：它不是硬依赖。
+// 用 ctx.inject() 延迟注入 —— 服务存在就注册设置项，不存在就默默跳过。
 export const inject = ['systemPrompt', 'tools'];
 
 const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
 
+/** 由 settings.register() 返回的句柄，apply() 时填入。 */
+let settingsHandle = null;
+
 /** 记忆流水目录。按优先级回退：
- *    1. DSH_MEMORY_DIR        —— 本插件自己的变量，推荐
- *    2. MEMORY_GALAXY_DIR     —— 早期从 dsh-memory-galaxy 借用的，保留兼容
- *    3. D:\memory             —— Windows 老用户的历史位置，存在就用
- *    4. <DSH_HOME>/memory     —— 跨平台默认值
+ *    1. 设置界面里填的 memoryDir（用户显式配置，优先级最高）
+ *    2. DSH_MEMORY_DIR        —— 环境变量
+ *    3. MEMORY_GALAXY_DIR     —— 早期从 dsh-memory-galaxy 借用的，保留兼容
+ *    4. D:\memory             —— Windows 老用户的历史位置，存在就用
+ *    5. <DSH_HOME>/memory     —— 跨平台默认值
  */
 const memDir = () => {
+  try {
+    const configured = settingsHandle?.get?.()?.memoryDir;
+    if (typeof configured === 'string' && configured.trim()) return configured.trim();
+  } catch { /* settings 读失败就走下面的回退 */ }
   const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
   if (explicit) return explicit;
   const legacy = 'D:\\memory';
   try { if (existsSync(legacy)) return legacy; } catch { /* 无权限时忽略 */ }
   return join(dshHome(), 'memory');
+};
+
+/** 只在「用户显式配置了路径」时创建它。
+ *  没配置就不创建 —— 插件不该在你磁盘上悄悄留东西。 */
+const ensureConfiguredDir = () => {
+  let configured = '';
+  try {
+    configured = settingsHandle?.get?.()?.memoryDir || '';
+  } catch { return; }
+  if (!configured.trim()) return;
+  const dir = configured.trim();
+  try {
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+      console.log(`[memory-curve] 已创建记忆目录：${dir}`);
+    }
+  } catch (err) {
+    console.warn(`[memory-curve] 无法创建记忆目录 ${dir}：${err?.message ?? err}`);
+  }
 };
 // node 进程写 D 盘会被系统拒（EPERM），摘要先生成在 memory-notes，再由
 // 桌面的「刷新记忆笔记」同步到 D:\memory\_摘要，最终仍落在 memory 文件夹里。
@@ -120,6 +149,44 @@ export function apply(ctx, config = {}) {
   const maxL1 = typeof config.maxL1 === 'number' ? config.maxL1 : MAX_L1;
   const maxL2 = typeof config.maxL2 === 'number' ? config.maxL2 : MAX_L2;
   const maxL3 = typeof config.maxL3 === 'number' ? config.maxL3 : MAX_L3;
+
+  // ── 设置项：让用户能在 DSH 的设置界面里填记忆目录 ──────────────
+  //
+  // settings 是可选服务，不写进 inject（那样服务缺席会导致整个插件挂起）。
+  // ctx.inject() 会在服务就绪时才跑回调，缺席就静默跳过，插件退回
+  // 环境变量 / 默认路径那套逻辑，功能不受影响。
+  try {
+    ctx.inject(['settings'], async (sctx) => {
+      try {
+        // schemastery 是 DSH 自带的包；用动态 import 免得静态依赖不存在时
+        // 整个插件加载失败。
+        const mod = await import('@deepseek-ai/schemastery');
+        const z = mod.default ?? mod;
+        if (!z || typeof z.object !== 'function') {
+          console.warn('[memory-curve] schemastery 不可用，跳过设置项');
+          return;
+        }
+
+        const schema = z.object({
+          memoryDir: z.string().default('').description(
+            '完整记忆存放目录。填了就自动创建；留空则用 DSH_MEMORY_DIR 或 <DSH_HOME>/memory',
+          ),
+        });
+
+        settingsHandle = sctx.settings.register('memory-curve', schema, {
+          base: { memoryDir: '' },
+          applies: 'live',
+        });
+
+        ensureConfiguredDir();                    // 填了但没建 → 建出来
+        settingsHandle.watch(() => ensureConfiguredDir());  // 改完立刻同步
+      } catch (err) {
+        console.warn(`[memory-curve] 注册设置项失败（不影响使用）：${err?.message ?? err}`);
+      }
+    });
+  } catch (err) {
+    console.warn(`[memory-curve] 无法延迟注入 settings：${err?.message ?? err}`);
+  }
 
   // 启动自检：确认 interpolate:false 真的生效。
   //
