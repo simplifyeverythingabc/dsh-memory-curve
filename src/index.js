@@ -20,7 +20,16 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import z from '@deepseek-ai/schemastery';
+/**
+ * schemastery 是 DSH 自带的包，只有宿主环境里有。
+ * 用顶层 await 做可选导入：拿得到就声明 Config（设置界面据此渲染表单），
+ * 拿不到就让 Config 保持 undefined —— Cordis 那边 `schema === void 0` 会跳过
+ * 表单，插件本体照常工作。这样在仓库目录、CI 里也能跑通。
+ */
+let z = null;
+try {
+  z = (await import('@deepseek-ai/schemastery')).default ?? null;
+} catch { /* 非宿主环境，没有就没有 */ }
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL, dump as dumpAccess } from './access.js';
@@ -36,15 +45,17 @@ export const inject = ['systemPrompt', 'tools'];
  * 值和 web-search 等现有插件一致：静态 import schemastery（它是 profile 的
  * 依赖，能正常解析）+ z.object(...)。
  */
-export const Config = z.object({
-  memoryDir: z
-    .string()
-    .default('')
-    .description(
-      '完整记忆存放目录。填了就用它（不存在会自动创建），支持 %USERPROFILE%\\memory、~/memory、D:/memory 这几种写法；留空则回退到 DSH_MEMORY_DIR 环境变量，再不行用 <DSH_HOME>/memory。',
-    )
-    .volatile(),
-});
+export const Config = z && typeof z.object === 'function'
+  ? z.object({
+      memoryDir: z
+        .string()
+        .default('')
+        .description(
+          '完整记忆存放目录。填了就用它（不存在会自动创建），支持 %USERPROFILE%\\memory、~/memory、D:/memory 这几种写法；留空则回退到 DSH_MEMORY_DIR 环境变量，再不行用 <DSH_HOME>/memory。',
+        )
+        .volatile(),
+    })
+  : undefined;
 
 const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
 
@@ -90,36 +101,51 @@ function configuredMemDir() {
   return normalizeDir(readField(liveConfig?.memoryDir, ''));
 }
 
-/** 记忆流水目录。按优先级回退：
- *    1. 设置界面里填的 memoryDir（用户显式配置，优先级最高）
- *    2. DSH_MEMORY_DIR        —— 环境变量
- *    3. MEMORY_GALAXY_DIR     —— 早期从 dsh-memory-galaxy 借用的，保留兼容
- *    4. D:\memory             —— Windows 老用户的历史位置，存在就用
- *    5. <DSH_HOME>/memory     —— 跨平台默认值
- */
-const memDir = () => {
-  const configured = configuredMemDir();
-  if (configured) return configured;
-  const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
-  if (explicit) return explicit;
-  const legacy = 'D:\\memory';
-  try { if (existsSync(legacy)) return legacy; } catch { /* 无权限时忽略 */ }
-  return join(dshHome(), 'memory');
-};
+/** 上一次确认过的目录。同一路径只 stat 一次，避免每个工具调用都走文件系统。 */
+let lastEnsuredDir = null;
 
 /** 只在「用户显式配置了路径」时创建它。
- *  没配置就不创建 —— 插件不该在你磁盘上悄悄留东西。 */
+ *  没配置就不创建 —— 插件不该在你磁盘上悄悄留东西。
+ *
+ *  带缓存：同一路径只处理一次。用户在设置页改动 memoryDir 后，live 引用指向
+ *  新路径，这里会因为路径变了而重新处理。 */
 const ensureConfiguredDir = () => {
   const dir = configuredMemDir();
-  if (!dir) return;
+  if (!dir) { lastEnsuredDir = null; return; }
+  if (dir === lastEnsuredDir) return;
+  lastEnsuredDir = dir;
   try {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
       console.log(`[memory-curve] 已创建记忆目录：${dir}`);
     }
   } catch (err) {
+    lastEnsuredDir = null;          // 失败了下轮再试
     console.warn(`[memory-curve] 无法创建记忆目录 ${dir}：${err?.message ?? err}`);
   }
+};
+
+/** 记忆流水目录。按优先级回退：
+ *    1. 设置界面里填的 memoryDir（用户显式配置，优先级最高）
+ *    2. DSH_MEMORY_DIR        —— 环境变量
+ *    3. MEMORY_GALAXY_DIR     —— 早期从 dsh-memory-galaxy 借用的，保留兼容
+ *    4. D:\memory             —— Windows 老用户的历史位置，存在就用
+ *    5. <DSH_HOME>/memory     —— 跨平台默认值
+ *
+ * 配置了路径时顺带确保目录存在 —— 不只 build() 走这条路，像 memory_curve_days
+ * 这种直接调 listDays 的工具也经过这里。
+ */
+const memDir = () => {
+  const configured = configuredMemDir();
+  if (configured) {
+    ensureConfiguredDir();
+    return configured;
+  }
+  const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
+  if (explicit) return explicit;
+  const legacy = 'D:\\memory';
+  try { if (existsSync(legacy)) return legacy; } catch { /* 无权限时忽略 */ }
+  return join(dshHome(), 'memory');
 };
 
 // 摘要固定在 <DSH_HOME>/memory-notes —— 和流水目录分开，流水可以在任何地方。
@@ -133,6 +159,9 @@ const PAD = (n) => String(n).padStart(2, '0');
 const dayOf = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${PAD(d.getMonth() + 1)}-${PAD(d.getDate())}`; };
 
 function build(now = Date.now()) {
+  // 用户可能在设置页改了 memoryDir —— live 引用会立刻变，但目录得有人建。
+  // apply 时建过一次，之后每次 build 再确认一下（目录已存在时只是一次 stat）。
+  ensureConfiguredDir();
   const entries = readEntries(memDir());
   const events = clusterEvents(entries);
   // 访问证据：这个事件下所有 id 的累计被查次数

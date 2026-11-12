@@ -81,6 +81,22 @@ try {
   if (typeof mod.name !== 'string') fail('name 导出', `实际是 ${typeof mod.name}`);
   else ok('name 导出', mod.name);
 
+  // Config 是可选导出：宿主环境（有 schemastery）里应该是有效 schema，
+  // 非宿主环境里允许是 undefined —— 那是刻意的降级，不算失败。
+  const cfg = mod.Config;
+  if (cfg === undefined) {
+    ok('Config 导出', 'undefined（无 schemastery，降级；宿主环境里才有）');
+  } else if (cfg && cfg.type === 'object' && cfg.dict && typeof cfg.toJSON === 'function') {
+    const fields = Object.keys(cfg.dict);
+    const volatileFields = fields.filter((k) => cfg.dict[k]?.meta?.volatile);
+    ok('Config 导出', `${fields.length} 个字段，${volatileFields.length} 个 volatile`);
+    if (volatileFields.length === 0) {
+      fail('Config volatile', '没有 volatile 字段 → DSH 设置界面不会渲染表单');
+    }
+  } else {
+    fail('Config 导出', `形状不对：${typeof cfg}`);
+  }
+
   // ── 假宿主：照真宿主的校验规则
   const tools = {};
   const contexts = [];
