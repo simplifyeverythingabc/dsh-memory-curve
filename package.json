@@ -15,11 +15,13 @@
   },
   "exports": {
     ".": "./src/index.js",
+    "./client": "./client.js",
     "./events": "./src/events.js",
     "./package.json": "./package.json"
   },
   "files": [
     "src",
+    "client.js",
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md",
@@ -29,6 +31,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "keywords": [
@@ -50,7 +59,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/events.js && node --check src/digest.js && node --check src/access.js",
+    "check": "node --check src/index.js && node --check src/events.js && node --check src/digest.js && node --check src/access.js && node --check client.js",
     "verify": "node tools/verify-ids.mjs",
     "selftest": "node tools/selftest.mjs",
     "build": "node tools/build-dailies.mjs"

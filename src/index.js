@@ -21,15 +21,15 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 /**
- * schemastery 是 DSH 自带的包，只有宿主环境里有。
- * 用顶层 await 做可选导入：拿得到就声明 Config（设置界面据此渲染表单），
- * 拿不到就让 Config 保持 undefined —— Cordis 那边 `schema === void 0` 会跳过
- * 表单，插件本体照常工作。这样在仓库目录、CI 里也能跑通。
+ * schemastery 是 DSH 自带的包，宿主环境里必有。
+ *
+ * 必须静态 import。曾经试过顶层 await 做可选导入，结果 Loader 读到模块时
+ * `Config` 还是 undefined（异步赋值没跑完），Host 就不投影 namespace，
+ * 设置界面永远显示 status=unavailable / revision=undefined。
+ *
+ * 代价：仓库目录 / CI 里没有这个包时模块加载会失败 —— CI 里造个 stub 顶上。
  */
-let z = null;
-try {
-  z = (await import('@deepseek-ai/schemastery')).default ?? null;
-} catch { /* 非宿主环境，没有就没有 */ }
+import z from '@deepseek-ai/schemastery';
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL, dump as dumpAccess } from './access.js';
@@ -45,17 +45,15 @@ export const inject = ['systemPrompt', 'tools'];
  * 值和 web-search 等现有插件一致：静态 import schemastery（它是 profile 的
  * 依赖，能正常解析）+ z.object(...)。
  */
-export const Config = z && typeof z.object === 'function'
-  ? z.object({
-      memoryDir: z
-        .string()
-        .default('')
-        .description(
-          '完整记忆存放目录。填了就用它（不存在会自动创建），支持 %USERPROFILE%\\memory、~/memory、D:/memory 这几种写法；留空则回退到 DSH_MEMORY_DIR 环境变量，再不行用 <DSH_HOME>/memory。',
-        )
-        .volatile(),
-    })
-  : undefined;
+export const Config = z.object({
+  memoryDir: z
+    .string()
+    .default('')
+    .description(
+      '完整记忆存放目录。填了就用它（不存在会自动创建），支持 %USERPROFILE%\\memory、~/memory、D:/memory 这几种写法；留空则回退到 DSH_MEMORY_DIR 环境变量，再不行用 <DSH_HOME>/memory。',
+    )
+    .volatile(),
+});
 
 const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
 
@@ -592,4 +590,14 @@ export function apply(ctx, config = {}) {
   }, 'memory-curve.tools');
 }
 
-export default { name: 'memory-curve', inject, apply };
+// 注意：这里刻意没有 `export default`。
+//
+// Cordis Loader 的 unwrapExports() 是 `exports.default ?? exports` ——
+// 只要模块提供了 default，整个命名空间就会被折叠成那个 default 对象，
+// `Config` 作为命名导出直接丢失。后果是：
+//   registry.plugin() 拿到的 plugin.Config === undefined
+//   → fiber.runtime.Config === undefined
+//   → dsh-settings 的 describe() 判定 schema === undefined 并跳过
+//   → 设置界面永远 status=unavailable、revision=undefined，保存被拒
+//
+// 只用命名导出（name / inject / Config / apply）就能让 Loader 拿到完整对象。

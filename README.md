@@ -106,66 +106,34 @@ pnpm add file:./path/to/dsh-memory-curve
 
 ---
 
-## 在设置界面里选记忆目录
+## 设置面板（只读）
 
-插件通过 `export const Config` 声明配置，DSH 的设置页据此渲染表单。装上重启后，**内置插件**里找到 `memory-curve`，展开就能看到：
+装上重启后，设置页会出现「记忆曲线」一页，显示**当前生效的记忆目录**。
 
-```
-memoryDir    完整记忆存放目录
-```
+**它能看，不能改** —— 这不是偷懒，是宿主限制：DSH 的 `configForms` 服务对本插件返回的 `form` 对象是空壳（只有 `unsubscribe`，没有 `mutate` / `getSnapshot`），拿不到写入通道。
 
-**填了就用它，而且目录不存在会自动创建**（多级路径也行）。留空则回退到下面那套。
+**改路径用下面两条路，都可靠：**
 
-### 路径写法
+### 一、改 profile 的 cordis.patch.yml
 
-不用自己转换，填就行：
-
-| 你填 | 实际使用 |
-|---|---|
-| `D:\memory` | 原样 |
-| `D:/memory` | `D:\memory` |
-| `D:\memory\` | `D:\memory`（去尾斜杠） |
-| `  D:\memory  ` | `D:\memory`（去空白） |
-| `%USERPROFILE%\memory` | `C:\Users\你\memory` |
-| `~\memory` 或 `~/memory` | 用户主目录下的 memory |
-| `relative\dir` | 相对当前工作目录转绝对 |
-
-### 优先级
-
-| 顺序 | 来源 | 说明 |
-|---|---|---|
-| 1 | **设置界面里的 `memoryDir`** | 用户显式配置，最高优先级 |
-| 2 | `DSH_MEMORY_DIR` | 环境变量 |
-| 3 | `MEMORY_GALAXY_DIR` | 兼容旧名 |
-| 4 | `D:\memory` | Windows 老位置，**存在才用** |
-| 5 | `<DSH_HOME>/memory` | 跨平台默认值 |
-
-### 改完立即生效
-
-`memoryDir` 标了 `.volatile()`，Loader 交给插件的是 live 引用（`{ get() }`）而不是裸值。Settings 提交时就地更新它，插件下一次读目录就能看到新值——**不用重启，不用重新挂载。**
-
-这也是为什么每个字段都必须是 `.volatile()`：`dsh-settings` 只给含 volatile 字段的 `Config` 提供设置界面，不标就不显示。
-
-### 只在显式配置时才创建目录
-
-没填 `memoryDir` 时插件**不会**创建任何目录，`readEntries()` 遇到不存在的目录直接返回空数组。这是有意的：插件不该在你磁盘上悄悄留东西。
-
-填了之后才创建，因为那是你明确要求的。
-
-### 配置存在哪
-
-写进 profile 的 `cordis.patch.yml`：
+在文件末尾加一个覆盖条目（**不要写 `- insert:` 形式**，那会让插件加载两次、id 重复，配置编辑器会直接把它过滤掉）：
 
 ```yaml
-- insert:
-    - id: memory-curve
-      name: dsh-memory-curve
-      config:
-        memoryDir: D:\memory      # ← 设置界面写的就是这一行
-        maxT1: 12
+- id: memory-curve
+  name: dsh-memory-curve
+  config:
+    memoryDir: D:\memory
 ```
 
-所以备份 profile 时它跟着走，手动改 yaml 也能生效。
+### 二、环境变量
+
+```powershell
+setx DSH_MEMORY_DIR "D:\memory"
+```
+
+重启 DSH 生效。适合 CI、脚本、不想碰 yaml 的场景。
+
+**优先级**：面板读的是同一个值，所以无论用哪条路，页面显示都会跟着变。
 ## 装完是空的，得先喂数据
 
 **插件只负责「读」，不负责「采集」。** 装上之后索引是空白的，六个工具都返回"没有记忆"，这是正常的。
@@ -397,6 +365,32 @@ Cordis 把它们全部收进 `disposables`，卸载时**反序执行**，而且�
 
 返回的是「注销这个工具」的 disposer。第二个参数 `options.when` 是逐步骤的启用条件，本插件没用到。
 
+### 绝对不要写 export default
+
+```js
+// ✗ 这样写会让 Config 凭空消失
+export default { name: 'memory-curve', inject, apply };
+```
+
+Cordis Loader 的归一化逻辑：
+
+```js
+unwrapExports(exports) {
+  exports = exports.default ?? exports;   // 有 default 就折叠成它
+  ...
+}
+```
+
+一旦提供 `default`，整个命名空间被折叠成那个对象，**`Config` 作为命名导出直接丢失**。后果是链条式崩塌：
+
+```
+registry.plugin() 拿到 plugin.Config === undefined
+  -> fiber.runtime.Config === undefined
+  -> dsh-settings 的 describe() 判定 schema === undefined 并跳过
+  -> 设置界面永远 status=unavailable / revision=undefined，保存被拒
+```
+
+而且报错信息完全不指向这里。只用命名导出就没事。
 **插件本体的三个导出**
 
 | 导出 | 必需 | 说明 |
