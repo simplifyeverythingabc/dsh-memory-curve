@@ -20,23 +20,48 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import z from '@deepseek-ai/schemastery';
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL, dump as dumpAccess } from './access.js';
 
 export const name = 'memory-curve';
 
-// settings 不在 inject 里声明：它不是硬依赖。
-// 用 ctx.inject() 延迟注入 —— 服务存在就注册设置项，不存在就默默跳过。
 export const inject = ['systemPrompt', 'tools'];
+
+/**
+ * 插件配置。DSH 的设置界面渲染的就是这个 schema —— 每个字段都要
+ * `.volatile()`，否则 `volatileForm()` 返回 undefined，整个表单不会出现。
+ *
+ * 值和 web-search 等现有插件一致：静态 import schemastery（它是 profile 的
+ * 依赖，能正常解析）+ z.object(...)。
+ */
+export const Config = z.object({
+  memoryDir: z
+    .string()
+    .default('')
+    .description(
+      '完整记忆存放目录。填了就用它（不存在会自动创建），支持 %USERPROFILE%\\memory、~/memory、D:/memory 这几种写法；留空则回退到 DSH_MEMORY_DIR 环境变量，再不行用 <DSH_HOME>/memory。',
+    )
+    .volatile(),
+});
 
 const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
 
-/** 由 settings.register() 返回的句柄，apply() 时填入。 */
-let settingsHandle = null;
+/** apply() 时存下来的 config，供模块级函数读取。 */
+let liveConfig = null;
 
-/** watch 的注销函数，卸载时调用，避免订阅泄漏。 */
-let stopSettingsWatch = null;
+/**
+ * 读一个配置字段。
+ *
+ * `.volatile()` 字段由 Loader 包成 live 引用（`{ get() }`）交给插件，
+ * 不是裸值 —— 这样 Settings 提交时会就地更新，改动直接到达运行中的插件。
+ * 所以每次都得解引用，不能缓存成字符串。
+ */
+function readField(field, fallback) {
+  const value = field && typeof field.get === 'function' ? field.get() : field;
+  return value === undefined ? fallback : value;
+}
 
 /**
  * 把用户填的路径变成可用的绝对路径。
@@ -60,14 +85,9 @@ function normalizeDir(input) {
   try { return resolve(s); } catch { return s; }
 }
 
-/** 读当前生效的记忆目录（用户显式配置的那份，已规范化）。空串表示没配。 */
+/** 设置界面里填的记忆目录（已规范化）。空串表示没配。 */
 function configuredMemDir() {
-  try {
-    const raw = settingsHandle?.get?.()?.memoryDir;
-    return normalizeDir(raw);
-  } catch {
-    return '';
-  }
+  return normalizeDir(readField(liveConfig?.memoryDir, ''));
 }
 
 /** 记忆流水目录。按优先级回退：
@@ -101,13 +121,6 @@ const ensureConfiguredDir = () => {
     console.warn(`[memory-curve] 无法创建记忆目录 ${dir}：${err?.message ?? err}`);
   }
 };
-
-/** 清掉设置句柄和订阅。插件卸载或重新注册前都要走一遍。 */
-function resetSettings() {
-  try { stopSettingsWatch?.(); } catch { /* 忽略 */ }
-  stopSettingsWatch = null;
-  settingsHandle = null;
-}
 
 // 摘要固定在 <DSH_HOME>/memory-notes —— 和流水目录分开，流水可以在任何地方。
 const digestDir = () => join(dshHome(), 'memory-notes', '_digest');
@@ -182,74 +195,16 @@ function dayIndex(graded, days) {
 export function apply(ctx, config = {}) {
   if (config.disabled === true) return;
 
+  // ── 记忆目录：设置界面里填的那个 ──────────────────────────────
+  // Config 声明了 memoryDir，DSH 的设置界面据此渲染表单。
+  // 字段标了 .volatile()，Loader 交给插件的是 live 引用（{ get() }），
+  // Settings 提交时就地更新 —— 所以这里存下 config，别缓存成字符串。
+  liveConfig = config;
+  ensureConfiguredDir();
+
   const maxL1 = typeof config.maxL1 === 'number' ? config.maxL1 : MAX_L1;
   const maxL2 = typeof config.maxL2 === 'number' ? config.maxL2 : MAX_L2;
   const maxL3 = typeof config.maxL3 === 'number' ? config.maxL3 : MAX_L3;
-
-  // ── 设置项：让用户能在 DSH 的设置界面里填记忆目录 ──────────────
-  //
-  // settings 是可选服务，不写进 inject（那样服务缺席会导致整个插件挂起）。
-  // ctx.inject() 会在服务就绪时才跑回调，缺席就静默跳过，插件退回
-  // 环境变量 / 默认路径那套逻辑，功能不受影响。
-  //
-  // 两个已知边界：
-  //   1. schemastery 只能异步 import，所以 apply 刚返回时 settingsHandle 还是 null，
-  //      本轮首次 build() 会走环境变量/默认路径。下一轮才用设置里的值。
-  //   2. 插件重载时 ctx.inject 会重跑，但 settings 服务那边同名的 registration
-  //      仍然存在（它的 effect 挂在服务上，不随插件卸载），再注册会抛
-  //      "already registered"。所以先查 settingsHandle，有就跳过。
-  let zSchema = null;
-
-  const registerSettings = (sctx) => {
-    if (!zSchema) {
-      console.warn('[memory-curve] schema 未就绪，跳过设置项注册');
-      return;
-    }
-    if (settingsHandle) {           // 重载场景：句柄还在，不重复注册
-      ensureConfiguredDir();
-      return;
-    }
-    settingsHandle = sctx.settings.register('memory-curve', zSchema, {
-      base: { memoryDir: '' },
-      applies: 'live',
-    });
-    ensureConfiguredDir();           // 填了但没建 → 建出来
-    try {
-      const stop = settingsHandle.watch(() => ensureConfiguredDir());
-      stopSettingsWatch = typeof stop === 'function' ? stop : null;
-    } catch (err) {
-      console.warn(`[memory-curve] 监听设置变化失败：${err?.message ?? err}`);
-    }
-    // 清理挂在「插件自己的 ctx」上，不是 sctx ——
-    // sctx 属于 settings 服务，服务重启时会误触发清理，把配置句柄清掉。
-    try { ctx.effect(() => () => resetSettings()); } catch { /* effect 不可用就算了 */ }
-  };
-
-  try {
-    ctx.inject(['settings'], async (sctx) => {
-      try {
-        if (!zSchema) {
-          // schemastery 是 DSH 自带包；动态 import 免得静态依赖缺失时整个插件挂掉
-          const mod = await import('@deepseek-ai/schemastery');
-          const z = mod.default ?? mod;
-          if (!z || typeof z.object !== 'function') {
-            console.warn('[memory-curve] schemastery 不可用，跳过设置项');
-            return;
-          }
-          zSchema = z.object({
-            memoryDir: z.string().default('').description(
-              '完整记忆存放目录。填了就自动创建；留空则用 DSH_MEMORY_DIR 或 <DSH_HOME>/memory',
-            ),
-          });
-        }
-        registerSettings(sctx);
-      } catch (err) {
-        console.warn(`[memory-curve] 注册设置项失败（不影响使用）：${err?.message ?? err}`);
-      }
-    });
-  } catch (err) {
-    console.warn(`[memory-curve] 无法延迟注入 settings：${err?.message ?? err}`);
-  }
 
   // 启动自检：确认 interpolate:false 真的生效。
   //
