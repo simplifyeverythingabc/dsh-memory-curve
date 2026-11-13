@@ -27,6 +27,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { normalizeDir } from '../src/paths.js';
 
 const base = process.env.MC_SELFTEST_ROOT || tmpdir();
 const root = mkdtempSync(join(base, 'mc-selftest-'));
@@ -68,6 +69,15 @@ let failed = 0;
 const fail = (name, note) => { bad(name, note); failed++; };
 
 try {
+  if (process.platform === 'win32') {
+    const unc = normalizeDir('//server/share/memory');
+    if (unc !== '//server/share/memory') {
+      fail('UNC 前斜杠路径', `应为 //server/share/memory，实际 ${unc}`);
+    } else {
+      ok('UNC 前斜杠路径', unc);
+    }
+  }
+
   const mod = await import('../src/index.js');
 
   // ── 声明层

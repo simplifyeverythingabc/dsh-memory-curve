@@ -92,11 +92,13 @@
 dsh plugin --profile desktop add github:simplifyeverythingabc/dsh-memory-curve
 ```
 
-本地开发目录可以把 GitHub 地址换成插件目录的绝对路径。也可以在 DSH 的插件管理界面里选择本地目录或 GitHub 来源安装。
+本地开发目录可以把 GitHub 地址换成插件目录的绝对路径。也可以在 DSH 的插件管理界面里选择本地目录或 GitHub 来源安装。安装器会把包放进当前 profile 的 `node_modules` 并加入 bundle 列表，不需要手动复制目录。
 
 **不要再手写 `~/.dsh/profiles/desktop/cordis.patch.yml` 里的 `- insert: id: memory-curve`。** Bundle 安装会自动应用包内的 `cordis.patch.yml`；再手写一条相同 id 会产生重复 entry，配置编辑器会过滤重复项。
 
 如果只运行普通 `pnpm add`，它只安装依赖，不一定把包加入 DSH 的 bundle 选择列表；安装后要在 DSH 的插件 / Bundle 管理入口里选中它。
+
+本插件依赖宿主自带的 `@deepseek-ai/schemastery`，不需要单独安装；用 npm 安装时看到这个 peer warning 可以忽略，前提是包最终通过 DSH Bundle 入口被选中。
 
 重启 DSH，确认日志出现：
 
@@ -367,28 +369,48 @@ npm run verify:strict        # 等价于 node tools/verify-ids.mjs --strict
 
 ## 验证它能不能跑
 
-仓库里带了个自检脚本，不需要 DSH 在运行，也不碰你的真实数据：
+这个自检不需要 DSH 在运行，也不碰你的真实数据；但**跑的位置不同，做法不同**。
+
+### A. 在部署目录里跑
+
+安装 Bundle 后，宿主已经提供 `@deepseek-ai/schemastery`：
+
+```bash
+cd ~/.dsh/profiles/desktop
+node node_modules/dsh-memory-curve/tools/selftest.mjs
+```
+
+### B. 在源码仓库里跑
+
+仓库里没有宿主自带的 `@deepseek-ai/schemastery`。CI 会先造一个最小 stub；本地也要先做同样的事：
+
+```bash
+mkdir -p node_modules/@deepseek-ai/schemastery
+```
+
+创建 `node_modules/@deepseek-ai/schemastery/package.json`：
+
+```json
+{"name":"@deepseek-ai/schemastery","version":"0.0.0","type":"module","main":"index.js"}
+```
+
+再创建 `node_modules/@deepseek-ai/schemastery/index.js`，内容直接复制 [.github/workflows/ci.yml](.github/workflows/ci.yml) 里的 `造 schemastery stub` step（约 L90–125）。最后运行：
 
 ```bash
 node tools/selftest.mjs
 ```
 
-它会在临时目录造两份最小流水（5 条消息），然后：
+stub 必须使用 `export default z`，因为源码是 `import z from '@deepseek-ai/schemastery'`。不造 stub 直接跑，会得到 `Cannot find package '@deepseek-ai/schemastery'`；这是宿主 peer 还没接入，不是插件逻辑失败。
 
-- 从零 import 插件，检查 `inject` 声明
-- 传一个最小 `ctx` 调 `apply()`，确认 6 个工具都注册上了
-- 求值 `context.text()`，确认能输出索引
-- 挨个调 6 个工具，确认都能返回内容
+自检会在临时目录造最小流水，检查 Config、disabled、inject、apply、context、6 个工具、分级上限和 disposer，共 20 项。全过会打印 `✓ 全部通过 —— 干净环境可跑` 并返回 0。
 
-全过会打印 `✓ 全部通过 —— 干净环境可跑` 并返回 0。
-
-**临时目录不可写时**（某些受限环境），指定一个可写位置：
+**临时目录不可写时**，指定一个可写位置：
 
 ```bash
 MC_SELFTEST_ROOT=/path/to/writable node tools/selftest.mjs
 ```
 
-注意这只是**模拟宿主**——用最小的 `ctx` 对象替代真实的 DSH。它能证明插件本身逻辑没问题，但证明不了跟真宿主的接口完全对得上。真装一遍才算数。
+这套自检是模拟宿主；安装 Bundle 后还要按安装节检查 live Config entry 和启动日志。
 ## 它依赖宿主的哪些能力
 
 自检脚本里的「假宿主」不是随手写的空壳，校验规则全部照抄 Cordis 和 DSH 的真实实现。下面这些是插件的硬依赖，缺一个就跑不起来：

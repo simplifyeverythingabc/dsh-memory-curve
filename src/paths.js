@@ -56,7 +56,7 @@ export function normalizeDir(input, env = process.env) {
   }
 
   // 3) UNC 先记标记，再统一分隔符
-  const unc = /^\\\\/.test(s);
+  const unc = /^\\\\/.test(s) || (process.platform === 'win32' && /^\/\//.test(s));
   s = s.replace(/[\\/]+/g, '/');
   if (unc) s = '//' + s.replace(/^\/+/, '');
 
