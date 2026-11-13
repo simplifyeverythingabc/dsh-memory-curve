@@ -125,7 +125,7 @@ jobs:
           export default z;
           EOF
 
-      - name: 接口自检（19 项）
+      - name: 接口自检（20 项）
         env:
           DSH_HOME: /tmp/dsh-home-ci
           MC_SELFTEST_ROOT: /tmp
