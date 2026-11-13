@@ -4,17 +4,42 @@
 // 就可能引用到不存在的条目。悬空引用比没有引用更糟 —— 它会让人以为「查到了」。
 //
 // 只报警，不改数据。发现问题列出日期、缺失 ID、来源摘要文件。
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
-// 流水目录：与插件 src/index.js 的 memDir()、tools/memory-notes.mjs 保持同一套优先级。
-// DSH_MEMORY_DIR 排第一 —— 三者必须一致，否则会对着空目录校验。
-const MEM = process.env.DSH_MEMORY_DIR
-  || process.env.MEMORY_GALAXY_DIR
-  || 'D:\\memory';
+
+// 目录解析的唯一真相是 src/paths.js 的 resolveMemDir()，和插件、memory-notes.mjs 共用。
+// tools 可能脱离插件包部署，所以按两种形态就地查找。
+const SRC_BASES = ['../src/', '../profiles/desktop/node_modules/dsh-memory-curve/src/'];
+const errs = [];
+let resolveMemDir;
+for (const base of SRC_BASES) {
+  try { ({ resolveMemDir } = await import(base + 'paths.js')); break; }
+  catch (e) { errs.push(`  ${base}paths.js → ${e.message}`); }
+}
+if (!resolveMemDir) {
+  console.error('找不到 src/paths.js，无法解析流水目录：');
+  for (const s of errs) console.error(s);
+  process.exit(1);
+}
+
+const MEM = resolveMemDir();
 const DIG = join(DSH_HOME, 'memory-notes', '_digest');
+
+// 两个目录都先确认存在 —— 否则下面第一句 readdirSync 就是一段 ENOENT 栈，
+// 看不出是「路径配错」还是「还没采集」。
+if (!existsSync(MEM)) {
+  console.error(`流水目录不存在：${MEM}`);
+  console.error('  用 DSH_MEMORY_DIR 指定实际目录，或先跑 node tools/memory-notes.mjs。');
+  process.exit(1);
+}
+if (!existsSync(DIG)) {
+  console.error(`摘要目录不存在：${DIG}`);
+  console.error('  先跑 node tools/build-dailies.mjs 生成摘要，再校验。');
+  process.exit(1);
+}
 
 const HEAD = /^(?:\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}\s+［.+?］(?:\s*<!--\s*(m_[0-9]{8}_[0-9a-f]{6})\s*-->)?\s*$/;
 
@@ -73,8 +98,15 @@ for (const fn of readdirSync(DIG)) {
       if (!live.has(last)) dangling.push({ file: fn, id: last });
     }
 
-    // b) 条数核对：+N 表示「首条之外还有 N 条」，所以总数是 N+1
-    const declared = plusN + 1;
+    // b) 条数核对：+N 表示「首条之外还有 N 条」，所以总数是 N+1。
+    // 旧摘要的「m_a..m_b」是顺序 id，能直接算差；哈希 id 算不了，退回 N+1（=1），
+    // 此时只核端点存在性 —— 别把「算不出来」报成「条数不符」。
+    const seqOf = (id) => {
+      const m2 = /_([0-9a-f]{6})$/.exec(id);
+      return m2 && /^\d{6}$/.test(m2[1]) ? Number(m2[1]) : null;
+    };
+    const s1 = seqOf(first), s2 = last ? seqOf(last) : null;
+    const declared = (s1 !== null && s2 !== null && s2 >= s1) ? (s2 - s1 + 1) : (plusN + 1);
     const at = m.index ?? 0;
     const ctxStart = raw.lastIndexOf('\n## ', at);
     if (ctxStart >= 0) {
@@ -120,7 +152,11 @@ if (rangeBad.length) {
 }
 
 // 4) 数据完整性三查
-const integrity = [];
+// 分两类：broken 是结构坏了（必须红），integrity 是启发式（只告警）。
+// 混在一起会让「某天导入一批历史日志」把 CI 变红，下一步必然有人加 || true，
+// 校验就回到摆设。
+const integrity = [];   // 疑似异常：膨胀倍数、锚点重复率
+const broken = [];      // 硬失败：结构坏了
 const dayFiles = readdirSync(MEM).filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f)).sort();
 const sizes = new Map();
 for (const fn of dayFiles) {
@@ -131,8 +167,8 @@ for (const fn of dayFiles) {
   const e = (raw.match(/dsh-note:auto-end:7f3a/g) || []).length;
   const heads = raw.match(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+［.+?］\s*<!--\s*m_[0-9]{8}_[0-9a-f]{6}\s*-->/gm) || [];
   const uniqHeads = new Set(heads).size;
-  if (b !== e) integrity.push(`${fn} 标记不配对：BEGIN ${b} / END ${e}`);
-  if (b > 1) integrity.push(`${fn} AUTO 区重复：BEGIN 出现 ${b} 次（应为 1）`);
+  if (b !== e) broken.push(`${fn} 标记不配对：BEGIN ${b} / END ${e}`);
+  if (b > 1) broken.push(`${fn} AUTO 区重复：BEGIN 出现 ${b} 次（应为 1）`);
   const dupRate = heads.length ? (heads.length - uniqHeads) / heads.length : 0;
   if (dupRate > 0.05) integrity.push(`${fn} 锚点重复率 ${(dupRate * 100).toFixed(0)}%（${heads.length} 个锚点只有 ${uniqHeads} 个唯一）`);
 }
@@ -146,16 +182,23 @@ for (let i = 7; i < days.length; i++) {
   }
 }
 
-if (integrity.length) {
-  console.log(`数据完整性：${integrity.length} 项异常`);
-  for (const s of integrity) console.log(`  ! ${s}`);
+if (broken.length) {
+  console.log(`数据完整性：${broken.length} 项异常`);
+  for (const s of broken) console.log(`  ! ${s}`);
 } else {
-  console.log(`数据完整性：${dayFiles.length} 天全部正常（标记配对 / 锚点唯一 / 体积无异常膨胀）`);
+  console.log(`数据完整性：${dayFiles.length} 天结构正常（标记配对 / AUTO 区唯一）`);
+}
+if (integrity.length) {
+  console.log(`疑似异常：${integrity.length} 项（不影响退出码，--strict 才升级为失败）`);
+  for (const s of integrity) console.log(`  ? ${s}`);
 }
 
 // 5) 反向统计
 const uncovered = [...live].filter((id) => !used.has(id)).length;
 console.log(`流水未进摘要的条目：${uncovered} / ${live.size}`);
 
-// 悬空引用或条数不符都算失败 —— 之前只算 dangling，rangeBad 坏了也返回 0
-process.exitCode = (dangling.length || rangeBad.length || integrity.length) ? 1 : 0;
+// 硬失败：悬空引用、条数不符、结构损坏。
+// 疑似（膨胀倍数、锚点重复率）只告警 —— 它们是启发式，加进退出码会把误报变成
+// 「所以大家都加 || true」，校验就没意义了。需要严格时用 --strict。
+const STRICT = process.argv.includes('--strict');
+process.exitCode = (dangling.length || rangeBad.length || broken.length || (STRICT && integrity.length)) ? 1 : 0;

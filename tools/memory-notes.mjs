@@ -25,23 +25,29 @@ const DSH_HOME = process.env.DSH_HOME
   || path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh');
 const SESSIONS = path.join(DSH_HOME, 'sessions');
 
-// 流水输出目录 —— 必须和插件 src/index.js 的 memDir() 算出同样的值，
-// 否则生成的内容插件读不到（早期版本就踩过这个坑：这里写 memory-notes，
-// 插件读 D:\memory，中间靠一个手写的 ps1 同步，别人装完根本用不了）。
+// 流水输出目录 —— 与插件 src/index.js 的 memDir() 必须是同一个值，否则生成的内容
+// 插件读不到（早期版本踩过：这里写 memory-notes、插件读 D:\memory，中间靠手写 ps1
+// 同步，别人装完根本用不了）。
 //
-// 优先级和 memDir() 保持一致：
-//   1. DSH_MEMORY_DIR
-//   2. MEMORY_GALAXY_DIR（兼容旧的）
-//   3. <DSH_HOME>/memory      ← 默认
+// 唯一真相在 src/paths.js 的 resolveMemDir()。tools 可能脱离插件包部署，
+// 所以就地在两种目录形态里找 src/。
 //
-// 注意：这里故意不往 D:\memory 兜底。某些环境下 node 进程被限制，写非系统盘会
-// EPERM（实测 DSH 自带的 node 运行时就是这样，同目录 PowerShell 却能写）。
-// 想要 D:\memory 就显式设 DSH_MEMORY_DIR，让使用者自己承担这个选择。
-function resolveMemDir() {
-  const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
-  if (explicit) return explicit;
-  return path.join(DSH_HOME, 'memory');
+// D:\memory 的「可写性」不在这里判断 —— 由下面的 assertWritable() 显式报错，
+// 不做静默改写到别处，那正是「写一个读另一个」的来源。
+const SRC_BASES = ['../src/', '../profiles/desktop/node_modules/dsh-memory-curve/src/'];
+
+async function loadSrc(name) {
+  const errs = [];
+  for (const base of SRC_BASES) {
+    try { return await import(base + name); }
+    catch (e) { errs.push(`  ${base}${name} → ${e.message}`); }
+  }
+  console.error(`找不到 src/${name}：`);
+  for (const s of errs) console.error(s);
+  process.exit(1);
 }
+
+const { resolveMemDir } = await loadSrc('paths.js');
 
 const OUT = resolveMemDir();
 
@@ -172,7 +178,6 @@ for (const [day, items] of [...byDay].sort()) {
   const lines = [day, ''];
   let chars = 0;
   let truncated = false;
-  let seq = 0;
   const dayCompact = day.replace(/-/g, '');
   for (const it of items) {
     // 去重 key 必须是全文哈希，不能只看开头 120 字。
@@ -183,8 +188,7 @@ for (const [day, items] of [...byDay].sort()) {
     if (seen.has(sig)) continue;
     seen.add(sig);
     const who = it.role === 'user' ? '主人' : '小鱼';
-    // 稳定锚点：同一天内按时间顺序编号。摘要靠它精确指回原文，
-    // 检索也能按 id 直取单条，而不是关键词模糊匹配。
+    // 稳定锚点：摘要靠它精确指回原文，检索也能按 id 直取单条。
     // id 用内容哈希，不用顺序号。
     //
     // 顺序号的问题：脚本每次全量重建，session 日志一长，后面的编号全部漂移 ——
@@ -193,7 +197,6 @@ for (const [day, items] of [...byDay].sort()) {
     // 全都指向了错内容。顺序编号和「写入时分配、之后不变」这个原则根本冲突。
     //
     // 内容哈希：同一段文字永远得到同一个 id，新数据只新增、不重排。
-    seq += 1;
     const id = `m_${dayCompact}_${createHash('sha1').update(it.text).digest('hex').slice(0, 6)}`;
     // 正文里不能出现标记行 —— 有些消息本身就在讨论这套标记（贴代码、贴报错），
     // 原样写进文件会被下次运行的剥除逻辑误吞，也会让 BEGIN/END 计数失衡。

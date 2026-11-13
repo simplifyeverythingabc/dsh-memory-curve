@@ -5,25 +5,33 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 /**
- * 找到 digest.js。
+ * 找到 src/ 下的模块。
  *
  * 两种部署形态的目录结构不同，所以两条路径都试：
- *   - 仓库 / 插件包内：tools/ 与 src/ 并列      → ../src/digest.js
- *   - 用户脚本目录：~/.dsh/tools/ 隔着 profiles/ → ../profiles/desktop/node_modules/dsh-memory-curve/src/digest.js
+ *   - 仓库 / 插件包内：tools/ 与 src/ 并列      → ../src/
+ *   - 用户脚本目录：~/.dsh/tools/ 隔着 profiles/ → ../profiles/desktop/node_modules/dsh-memory-curve/src/
+ *
+ * 两边都失败时把两条错误一起打出来 —— 只 catch 不报会把真正的错因（语法错、
+ * 依赖缺失）藏成一条无关的 ENOENT。
  */
-let buildDailies;
-try {
-  ({ buildDailies } = await import('../src/digest.js'));
-} catch {
-  ({ buildDailies } = await import('../profiles/desktop/node_modules/dsh-memory-curve/src/digest.js'));
+const SRC_BASES = ['../src/', '../profiles/desktop/node_modules/dsh-memory-curve/src/'];
+
+async function loadSrc(name) {
+  const errs = [];
+  for (const base of SRC_BASES) {
+    try { return await import(base + name); }
+    catch (e) { errs.push(`  ${base}${name} → ${e.message}`); }
+  }
+  console.error(`找不到 src/${name}：`);
+  for (const s of errs) console.error(s);
+  process.exit(1);
 }
 
-// 流水目录：与插件 src/index.js 的 memDir() 保持同一套优先级。
-// DSH_MEMORY_DIR 排第一 —— memory-notes.mjs 也认它，三者必须一致。
-const MEM = process.env.DSH_MEMORY_DIR
-  || process.env.MEMORY_GALAXY_DIR
-  || 'D:\\memory';
+const { buildDailies } = await loadSrc('digest.js');
+const { resolveMemDir } = await loadSrc('paths.js');
 
+// 流水目录与插件、memory-notes.mjs 同一套（src/paths.js）。
+const MEM = resolveMemDir();
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 const DIG = join(DSH_HOME, 'memory-notes', '_digest');
 
