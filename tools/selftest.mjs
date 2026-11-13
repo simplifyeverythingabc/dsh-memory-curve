@@ -203,7 +203,7 @@ try {
 
   // ── apply
   try {
-    mod.apply(ctx, { maxT1: 12, maxT2: 20, maxT3: 8 });
+    mod.apply(ctx, { maxL1: 12, maxL2: 20, maxL3: 8, memoryDir: '' });
     ok('apply() 执行', `注册 ${Object.keys(tools).length} 个工具，${contexts.length} 个 context`);
   } catch (e) {
     fail('apply() 执行', e.message.slice(0, 80));
@@ -236,6 +236,29 @@ try {
       ok('context 求值', `${out.length} 字符`);
       if (!out.includes('记忆事件索引')) fail('context 内容', '缺少标题行');
     }
+  }
+
+  // ── 分级上限真的生效
+  // 之前 layered() 只把 total 当「补名额」的上限，不当「削」的上限，
+  // 而默认 12 恰好等于 4+4+4，所以 maxL1 配小了完全没效果。
+  try {
+    const { renderForPrompt } = await import('../src/events.js');
+    const base = Date.now() - 3600000;
+    const fake = [
+      { idx: 0, level: 'L1', startAt: base,      count: 3, S: 9, head: '甲' },
+      { idx: 1, level: 'L1', startAt: base + 60, count: 2, S: 8, head: '乙' },
+    ];
+    const t0 = renderForPrompt(fake, { maxL1: 0, maxL2: 0, maxL3: 0 });
+    if (t0.includes('L1 核心事件')) {
+      fail('分级上限生效', `maxL1=0 仍注入了 L1 段`);
+    } else {
+      const t2 = renderForPrompt(fake, { maxL1: 2, maxL2: 0, maxL3: 0 });
+      const n = (t2.match(/^- /gm) || []).length;
+      if (n !== 2) fail('分级上限生效', `maxL1=2 应得 2 条，实得 ${n}`);
+      else ok('分级上限生效', 'maxL1=0 段消失，maxL1=2 得 2 条');
+    }
+  } catch (e) {
+    fail('分级上限生效', e.message.slice(0, 80));
   }
 
   // ── 工具有没有真的干活
