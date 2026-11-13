@@ -130,15 +130,36 @@ jobs:
           export default z;
           EOF
 
-      - name: 接口自检（18 项）
+      - name: 接口自检（19 项）
         env:
           DSH_HOME: /tmp/dsh-home-ci
           MC_SELFTEST_ROOT: /tmp
         run: node tools/selftest.mjs
 
-      - name: 汇总数据完整性
+      - name: 校验器自证（会红 + 会绿）
+        env:
+          DSH_HOME: /tmp/dsh-home-ci
         run: |
-          mkdir -p /tmp/mem2
-          cp /tmp/memory/*.md /tmp/mem2/ 2>/dev/null || true
-          echo "（verify-ids 需要真实摘要，CI 只验语法和退出码路径）"
-          node --check tools/verify-ids.mjs
+          set -e
+          mkdir -p /tmp/vmem /tmp/dsh-home-ci/memory-notes/_digest
+          printf '2026-01-15 10:00 ［用户］ <!-- m_20260115_a1b2c3 -->\n连接池超时怎么排查\n' > /tmp/vmem/2026-01-15.md
+          printf '# 2026-01-15 摘要\n\n## 10:00 ［用户］ 连接池超时（1条）\n\n覆盖: m_20260115_a1b2c3\n' \
+            > /tmp/dsh-home-ci/memory-notes/_digest/2026-01-15.md
+
+          # 1) 正常数据必须绿
+          if ! DSH_MEMORY_DIR=/tmp/vmem node tools/verify-ids.mjs; then
+            echo "正常数据被判异常 —— 校验器在乱报"
+            exit 1
+          fi
+
+          # 2) 手动引一个不存在的 id，必须红
+          sed -i 's/m_20260115_a1b2c3/m_20260115_fffff0/' /tmp/dsh-home-ci/memory-notes/_digest/2026-01-15.md
+          set +e
+          DSH_MEMORY_DIR=/tmp/vmem node tools/verify-ids.mjs
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "坏数据没被判异常（退出码 $code）—— 假绿灯又回来了"
+            exit 1
+          fi
+          echo "verify-ids 正确报红（退出码 1）"
