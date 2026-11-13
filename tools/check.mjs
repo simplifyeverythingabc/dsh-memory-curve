@@ -40,6 +40,8 @@ if (targets.length === 0) {
 const REQUIRED = [
   'src/index.js', 'src/events.js', 'src/digest.js', 'src/access.js', 'src/paths.js',
   'tools/check.mjs', 'tools/selftest.mjs', 'tools/verify-ids.mjs',
+  // build-dailies 比 bench 更核心：apply 启动时就会调 buildDailies，它坏了主链路掉一半
+  'tools/memory-notes.mjs', 'tools/build-dailies.mjs', 'tools/bench.mjs',
 ];
 const missing = REQUIRED.filter((r) => !targets.some((p) => p.replace(/\\/g, '/').endsWith(r)));
 if (missing.length) {
