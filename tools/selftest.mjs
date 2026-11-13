@@ -81,8 +81,6 @@ try {
   if (typeof mod.name !== 'string') fail('name 导出', `实际是 ${typeof mod.name}`);
   else ok('name 导出', mod.name);
 
-  // Config 是可选导出：宿主环境（有 schemastery）里应该是有效 schema，
-  // 非宿主环境里允许是 undefined —— 那是刻意的降级，不算失败。
   // Config 是必需的：cordis.patch.yml 里的 config 段按它校验和补默认值。
   // 设置面板已移除，所以不再要求 volatile 字段存在的理由（那本来是为了让面板渲染表单）——
   // volatile 现在唯一的职责是让 Loader 把该字段包成 live 引用，值仍然来自 patch。
@@ -90,10 +88,21 @@ try {
   if (cfg === undefined) {
     fail('Config 导出', 'undefined（宿主环境必须有）');
   } else if (cfg && cfg.type === 'object' && cfg.dict && typeof cfg.toJSON === 'function') {
-    const required = ['memoryDir', 'maxL1', 'maxL2', 'maxL3'];
+    const required = ['disabled', 'memoryDir', 'maxL1', 'maxL2', 'maxL3'];
     const missing = required.filter((k) => !cfg.dict[k]);
     if (missing.length) fail('Config 字段', '缺 ' + missing.join(', '));
     else ok('Config 字段', required.join(', '));
+
+    // disabled 必须是 boolean、默认 false —— 否则 patch 里写 true 会被 schema 剥掉，
+    // apply 的守卫又变回永不触发的死代码。
+    const dis = cfg.dict.disabled;
+    if (!dis || dis.type !== 'boolean') {
+      fail('disabled 类型', `应为 boolean，实际 ${dis?.type}`);
+    } else if (dis.meta?.default !== false) {
+      fail('disabled 默认值', `应为 false，实际 ${JSON.stringify(dis.meta?.default)}`);
+    } else {
+      ok('disabled 类型', 'boolean, default=false');
+    }
 
     const md = cfg.dict.memoryDir;
     if (!md || md.type !== 'string') fail('memoryDir 类型', `应为 string，实际 ${md?.type}`);
@@ -104,8 +113,14 @@ try {
       if (!f || f.type !== 'number') fail(`${k} 类型`, `应为 number，实际 ${f?.type}`);
     }
     const badNums = ['maxL1', 'maxL2', 'maxL3'].filter((k) => typeof cfg.dict[k]?.meta?.default !== 'number');
-    if (badNums.length) fail('分级上限默认值', '应为数字：' + badNums.join(', '));
-    else ok('分级上限默认值', 'maxL1=12 maxL2=20 maxL3=8');
+    if (badNums.length) {
+      fail('分级上限默认值', '应为数字：' + badNums.join(', '));
+    } else {
+      // 文案里的数字从 schema 现读，不写死 —— 以前这里是 'maxL1=12 maxL2=20 maxL3=8'
+      // 的常量字符串，src 里的默认值改了它照样报绿，是条假绿灯文案。
+      const got = ['maxL1', 'maxL2', 'maxL3'].map((k) => `${k}=${cfg.dict[k].meta.default}`).join(' ');
+      ok('分级上限默认值', got);
+    }
   } else {
     fail('Config 导出', `形状不对：${typeof cfg}`);
   }

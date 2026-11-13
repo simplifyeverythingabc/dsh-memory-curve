@@ -6,9 +6,6 @@
 // 只报警，不改数据。发现问题列出日期、缺失 ID、来源摘要文件。
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
-
-const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 
 // 目录解析的唯一真相是 src/paths.js 的 resolveMemDir()，和插件、memory-notes.mjs 共用。
 // tools 可能脱离插件包部署，所以按两种形态就地查找。
