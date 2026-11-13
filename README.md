@@ -14,14 +14,14 @@
 
 ```
 【记忆事件索引 · 按遗忘曲线】
-完整流水 D:\memory（1488 条 / 96 事件）
-分级：T1 22　T2 10　T3 8　T4 6　T5 50
+完整流水 <记忆目录>（1488 条 / 96 事件）
+分级：L1 22　L2 10　L3 8　L4 6　L5 50
 
 【最近几天 · 定位用】
-- 2026-03-15　222条  8事件 T1×8　把 nacos 的配置挪到本地文件里…
-- 2026-03-14　314条 12事件 T1×10 T2×2　先看日志再改代码，别猜…
+- 2026-03-15　222条  8事件 L1×8　把 nacos 的配置挪到本地文件里…
+- 2026-03-14　314条 12事件 L1×10 L2×2　先看日志再改代码，别猜…
 
-【T1 核心事件 · 常驻】
+【L1 核心事件 · 常驻】
 - 03-13 28条　连接池上限调到 200 之后超时确实少了…
 - 03-14 28条　那个 401 是网关的 header 没透传…
 ...
@@ -36,7 +36,7 @@
 ```
 条目 11　事件 5
 
-【T3 活跃事件 · 只留索引】
+【L3 活跃事件 · 只留索引】
 - 03-13 3条　连接池上限调多少合适
 - 03-14 2条　网关那边 401 了，本地是好的
 - 03-14 2条　加了，通了
@@ -51,8 +51,8 @@
 
 注意几点：
 
-- **没有 T1/T2**：只有三天数据，`S` 值还不够（T1 要 `S≥6`）。数据攒够了才会往上升
-- **T3 和「更早」有重复**：前者是等级分层，后者是兜底补位。T1/T2 空的时候两段会重叠，这是正常的
+- **没有 L1/L2**：只有三天数据，`S` 值还不够（L1 要 `S≥6`）。数据攒够了才会往上升
+- **L3 和「更早」有重复**：前者是等级分层，后者是兜底补位。L1/L2 空的时候两段会重叠，这是正常的
 - **每行只留首句**：正文永远在磁盘上，`memory_curve_raw` 按 id 取
 
 真实跑起来（几百条 / 几十天）会是四段齐全的样子，见本文开头的示例。
@@ -63,7 +63,7 @@
 
 ```
 ┌─ 第一层：完整流水（永久，一字不删）
-│    ~/.dsh/memory/2026-11-10.md      或 D:\memory\2026-11-10.md
+│    <记忆目录>/2026-11-10.md         目录由 src/paths.js 统一解析
 │    每行一条消息，带内容哈希锚点
 │
 ├─ 第二层：每日摘要（自动生成）
@@ -71,7 +71,7 @@
 │    事件清单 + 首尾句 + 关键词，还有 .ids.json 索引
 │
 └─ 第三层：注入上下文（每轮重算）
-     T1/T2 事件标题 + 最近几天速览
+     L1/L2/L3 事件段 + 最近几天速览 + 历史补位
 ```
 
 **检索链**：上下文看到线索 → `memory_curve_day` 读摘要 → `memory_curve_raw` 回原文。
@@ -80,29 +80,31 @@
 
 ## 安装
 
+用 DSH 的插件 / Bundle 安装入口安装这个包。这个入口会把包加入当前 profile 的 `dsh.profile.bundles`，然后读取包里的 `package.json`：
+
+```json
+"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+```
+
+推荐从 GitHub 安装：
+
 ```bash
-# 1. 进到你的 DSH profile 目录
-cd ~/.dsh/profiles/desktop
-
-# 2. 装插件
-pnpm add file:./path/to/dsh-memory-curve
-
-# 3. 在 cordis.patch.yml 里加一行
+dsh plugin --profile desktop add github:simplifyeverythingabc/dsh-memory-curve
 ```
 
-`cordis.patch.yml`：
+本地开发目录可以把 GitHub 地址换成插件目录的绝对路径。也可以在 DSH 的插件管理界面里选择本地目录或 GitHub 来源安装。
 
-```yaml
-- insert:
-    - id: memory-curve
-      name: dsh-memory-curve
-      config:
-        maxL1: 12      # L1 最多列几条
-        maxL2: 20      # L2 最多列几条
-        maxL3: 8       # L3 只留索引
+**不要再手写 `~/.dsh/profiles/desktop/cordis.patch.yml` 里的 `- insert: id: memory-curve`。** Bundle 安装会自动应用包内的 `cordis.patch.yml`；再手写一条相同 id 会产生重复 entry，配置编辑器会过滤重复项。
+
+如果只运行普通 `pnpm add`，它只安装依赖，不一定把包加入 DSH 的 bundle 选择列表；安装后要在 DSH 的插件 / Bundle 管理入口里选中它。
+
+重启 DSH，确认日志出现：
+
+```
+[memory-curve] context 注册: interpolate=false
 ```
 
-重启 DSH，看到 `[memory-curve] context 注册: interpolate=false` 就成了。
+安装器显示 `application: applied` 后，重启一次；若安装器返回 `restart-required`，先完成重启再检查日志。加载失败或被 disabled 时不会出现这行日志，应先看安装器返回的诊断。
 
 ---
 
@@ -137,11 +139,20 @@ export DSH_MEMORY_DIR="$HOME/memory"
 
 ### 临时停用
 
-在 profile patch 里给 memory-curve 那行加 \disabled: true\，重启后记忆插件不注册任何工具、也不注入上下文。想恢复就删掉那行或改成 false。
+在 profile patch 里加一个顶层覆盖条目：
+
+```yaml
+- id: memory-curve
+  name: dsh-memory-curve
+  disabled: true
+```
+
+这是 Loader 的条目级停用，重启后不注册任何工具、也不注入上下文。想恢复就删掉这条停用覆盖，或改成 `disabled: false`。
+插件自身的 `config.disabled: true` 也支持停用，但如果覆盖 `config`，要重述完整 config，因为 Loader 对 config 是整体替换。
 
 ### 或者在 profile 里覆盖（只影响插件）
 
-编 `~/.dsh/profiles/desktop/cordis.patch.yml`，末尾加：
+编辑 `~/.dsh/profiles/desktop/cordis.patch.yml`，末尾加：
 
 ```yaml
 - id: memory-curve
@@ -162,37 +173,48 @@ DSH 的 `configForms` 服务对本插件返回的 `form` 对象是空壳 —— 
 
 **放弃面板后反而更清爽**：少一个 client bundle，少一层出错的可能，环境变量本来就更适合这种「一次配好不再动」的东西。
 
-## 装完是空的，得先喂数据
+## 首次使用（四步）
 
-**插件只负责「读」，不负责「采集」。** 装上之后索引是空白的，六个工具都返回"没有记忆"，这是正常的。
+**插件只负责读和检索，不负责自动采集。** 新用户在第一次采集前看到「（暂无高留存事件）」属于正常空索引，不是安装失败。
 
-流水得从 DSH 自己的会话日志生成：
+1. 安装 Bundle，重启 DSH，确认日志出现 `[memory-curve] context 注册: interpolate=false`。
+2. 在插件包目录执行采集脚本：
 
-```bash
-node tools/memory-notes.mjs
-```
+   ```bash
+   node tools/memory-notes.mjs
+   ```
 
-它会读 `<DSH_HOME>/sessions/`，把每天的对话写成 `<内存目录>/YYYY-MM-DD.md`。
+   如果你当前在 profile 目录，执行：
 
-**内存目录怎么定**（`tools/memory-notes.mjs` 和 `src/index.js` 用同一套规则）：
+   ```bash
+   node node_modules/dsh-memory-curve/tools/memory-notes.mjs
+   ```
+
+3. 采集器读取 `<DSH_HOME>/sessions/`，按下面的目录规则写入 `<记忆目录>/YYYY-MM-DD.md`。
+4. 开始下一轮对话即可刷新索引；也可以重启 DSH，在启动时重建摘要。
+
+已有有效流水的用户可以跳过第 2 步。会话目录不存在时采集器会提示后以退出码 0 结束，此时只是没有产生流水。
+
+### 内存目录怎么定
+
+`tools/memory-notes.mjs`、`tools/build-dailies.mjs`、`tools/verify-ids.mjs` 和插件都调用 `src/paths.js` 的同一个 `resolveMemDir()`：
 
 | 优先级 | 来源 | 说明 |
 |---|---|---|
 | 1 | `DSH_MEMORY_DIR` | 推荐显式设成这个 |
-| 2 | `MEMORY_GALAXY_DIR` | 早期从 dsh-memory-galaxy 借的变量，保留兼容 |
-| 3 | `<DSH_HOME>/memory` | 默认值 |
+| 2 | `MEMORY_GALAXY_DIR` | 兼容旧名 |
+| 3 | `D:\memory` | 仅 Windows，目录存在才沿用 |
+| 4 | `<DSH_HOME>/memory` | 默认值 |
 
-默认 `<DSH_HOME>` 是 `~/.dsh`。所以什么都不设的话，流水会落在 `~/.dsh/memory/`。
+`<DSH_HOME>` 默认是 `~/.dsh`。未设置目录环境变量时，Windows 上已有 `D:\memory` 会被沿用；否则使用 `<DSH_HOME>/memory`。想固定位置请显式设置 `DSH_MEMORY_DIR`。
 
-**为什么默认不往 `D:\memory` 写**：某些环境下 node 进程被限制，写非系统盘会 `EPERM`——实测 DSH 自带的 node 运行时就是这样，同一目录下 PowerShell 却能正常写。与其赌，不如默认走一定可写的位置。真要放 D 盘，显式设 `DSH_MEMORY_DIR=D:\memory`。
+采集脚本会先探测目标目录是否可写，不可写就当场报错，不会静默改写到另一个目录。插件未配置 `config.memoryDir` 时，读取不存在的目录按空记忆处理；显式配置 `memoryDir` 时会尝试创建该目录。
 
-脚本跑之前会先探测目标目录可不可写，不可写就当场报错并给出换目录的建议，不会跑到一半才崩。会话日志目录不存在时也只是提示一句然后正常退出（退出码 0），不抛异常。
+Windows UNC 路径请用双反斜杠开头，例如 `\\server\share\memory`；这种输入规范化后保留 `//` 前缀。当前版本直接填写 `//server/share/memory` 会丢掉一个前导斜杠，配置时用前一种写法。
 
-**为什么不自动采集**：记忆是私密的。采哪些会话、留多久、写到哪里，应该由你决定，不该由插件替你决定。
+**为什么不自动采集**：记忆是私密的。采哪些会话、留多久、写到哪里，由你决定。
 
-**为什么插件不自己建目录**：`readEntries()` 第一行就是 `if (!existsSync(memDir)) return []`。目录不存在就当没有记忆，不报错也不创建。这样插件不会在你的磁盘上悄悄留下东西。
-
-**跑完之后**：索引会在下一步对话开始时出现。想立刻看到结果就重启一次 DSH。
+**跑完之后**：索引会在下一轮对话开始时出现。想立刻看到结果就重启一次 DSH。
 
 ### 手动造流水也行
 
@@ -239,24 +261,26 @@ S = ln(1+条数) × (1 + 0.35·ln(1+跨度天数)) × (1 + 密度/60) × accessB
 R = exp(−距今小时 ÷ (S × 24))
 ```
 
-**分级**（从上往下第一个匹配）：
+**分级**（先把 S 四舍五入到 2 位、R 四舍五入到 3 位，再从上往下匹配第一个等级）：
 
-| 等级 | 条件 | 进上下文吗 |
+| 等级 | 条件 | 注入方式 |
 |---|---|---|
-| T1 | R ≥ 0.72 且 S ≥ 6 | 是，常驻 |
-| T2 | R ≥ 0.5 且 S ≥ 4 | 是 |
-| T3 | R ≥ 0.3 | 只留标题 |
-| T4 | R ≥ 0.12 | 只留索引 |
-| T5 | 其余 | 不进上下文 |
+| L1 | R ≥ 0.72 且 S ≥ 6 | 独立事件段，受 `maxL1` 限制 |
+| L2 | R ≥ 0.5 且 S ≥ 4 | 独立事件段，受 `maxL2` 限制 |
+| L3 | R ≥ 0.3 | 独立事件段，受 `maxL3` 限制 |
+| L4 | R ≥ 0.12 | 不单列等级段，但 7 天以上的事件可能进入历史补位 |
+| L5 | 其余 | 不单列等级段，但 7 天以上的事件可能进入历史补位 |
+
+`maxL1` / `maxL2` / `maxL3` 默认是 12 / 20 / 8，取值范围 0..200。设为 0 会关闭对应等级的独立段；它们不关闭「更早 · 按 S 补位」，后者最多取 4 条且不限等级。
 
 **但是**——纯粹的"越新越重要"会漏掉低密度但关键的日期。所以加了两条补丁：
 
 1. **时间桶配额**：今天 / 本周 / 更早 各保留 4 个，桶内按 S 排
-2. **历史补位**：不限等级按加权 S 补位，聊天类降权到 0.25、技术密度高的加权
+2. **历史补位**：7 天以上不限等级按加权 S 补位，聊天类降权到 0.25、技术密度高的加权
 
 这样"三天前那个只有两条消息的调试记录"不会因为条数少被彻底埋掉。
 
-**"遗忘"的真实含义**：T4/T5 不进上下文，但**文件永远保留**，`memory_search` 随时能搜到。
+**"遗忘"的真实含义**：L4/L5 不单列等级段，但它们可能进入历史补位；完整内容**永远保留**，`memory_search` 随时能搜到。
 
 ---
 
@@ -471,13 +495,13 @@ node tools/bench.mjs
 夹具文本改了要同步改锚点，否则会出现「查询词根本不在答案里」的假失败。这个坑踩过：最初写「超时 怎么 排查」配锚点「先确认 wait_timeout」，而那句话里压根没有「超时」二字 —— 疑问词被剥离后只搜「超时」，永远召回不到。**测试写错比代码写错更隐蔽。**
 ## 已知限制
 
-**一、Windows 特有**
+**一、目录优先级**
 
-流水路径默认会先试 `D:\memory`（历史原因），不存在才用 `<DSH_HOME>/memory`。跨平台请显式设 `DSH_MEMORY_DIR`。
+四个入口共用同一套解析：`DSH_MEMORY_DIR` → `MEMORY_GALAXY_DIR` → Windows 上存在的 `D:\memory` → `<DSH_HOME>/memory`。跨平台请显式设 `DSH_MEMORY_DIR`；相对路径会按各进程的 cwd 转绝对，生产环境写绝对路径。
 
 **二、需要 DSH 0.2.x**
 
-用了 `ctx.systemPrompt.context()` 这个官方 API。注册时**必须**设 `interpolate: false`，否则记忆内容里出现 `{{` 会被当成提示变量解析直接抛错。
+用了 `ctx.systemPrompt.context()` 这个官方 API。本机按 DSH 0.2.2-rc.1 验证过；包通过 `peerDependencies` 声明宿主提供的 `@deepseek-ai/schemastery`，不把宿主内部包重复打进插件。注册时**必须**设 `interpolate: false`，否则记忆内容里出现 `{{` 会被当成提示变量解析直接抛错。
 
 **三、内容哈希的两个边界**
 
