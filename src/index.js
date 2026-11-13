@@ -57,9 +57,9 @@ export const Config = z.object({
       '完整记忆存放目录。填了就用它（不存在会自动创建），支持 %USERPROFILE%\\memory、~/memory、D:/memory 这几种写法；留空则回退到 DSH_MEMORY_DIR 环境变量，再不行用 <DSH_HOME>/memory。',
     )
     .volatile(),
-  maxL1: z.number().default(12).description('L1 事件最多列几条，控制注入体积。'),
-  maxL2: z.number().default(20).description('L2 事件最多列几条。'),
-  maxL3: z.number().default(8).description('L3 事件最多列几条。'),
+  maxL1: z.number().min(0).max(200).default(12).description('L1 事件最多列几条，控制注入体积。'),
+  maxL2: z.number().min(0).max(200).default(20).description('L2 事件最多列几条。'),
+  maxL3: z.number().min(0).max(200).default(8).description('L3 事件最多列几条。'),
 });
 
 
@@ -256,9 +256,12 @@ export function apply(ctx, config = {}) {
   liveConfig = config;
   ensureConfiguredDir();
 
-  const maxL1 = typeof config.maxL1 === 'number' ? config.maxL1 : MAX_L1;
-  const maxL2 = typeof config.maxL2 === 'number' ? config.maxL2 : MAX_L2;
-  const maxL3 = typeof config.maxL3 === 'number' ? config.maxL3 : MAX_L3;
+  // schema 是第一道闸（.min(0).max(200)），这里是第二道 —— NaN / Infinity 都能穿过
+  // typeof 检查（typeof NaN === 'number'），得用 Number.isFinite 才算数。
+  const num = (v, d) => (Number.isFinite(v) ? Math.max(0, Math.min(200, v)) : d);
+  const maxL1 = num(config.maxL1, MAX_L1);
+  const maxL2 = num(config.maxL2, MAX_L2);
+  const maxL3 = num(config.maxL3, MAX_L3);
 
   // 启动自检：确认 interpolate:false 真的生效。
   //
