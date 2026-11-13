@@ -358,14 +358,31 @@ export function readByIds(arg) {
   const { memDir, ids, maxChars = 4000 } = arg || {};
   const res = [];
   let used = 0;
+  let truncated = 0;
   for (const id of ids) {
     const one = readById({ memDir, id });
     if (!one) continue;
-    if (used + one.text.length > maxChars) break;
+    if (used + one.text.length > maxChars) {
+      // 保底：一条都还没塞进去时，至少给第一条的截断版。
+      // 以前这里是裸 break，单条超过 maxChars 就 found=0，
+      // 工具返回「共 N 条 / 本次只取到 0 条」，看起来像坏了。
+      if (res.length === 0) {
+        res.push(one.text.slice(0, Math.max(200, maxChars - 120))
+          + `\n…（本条 ${one.text.length} 字符，已截断到 ${maxChars} 上限；加大 maxChars 取全文）`);
+        truncated = 1;
+        used = maxChars;
+      }
+      break;
+    }
     res.push(one.text);
     used += one.text.length;
   }
-  return { found: res.length, total: ids.length, text: res.join('\n\n') };
+  return {
+    found: res.length,
+    total: ids.length,
+    truncated,
+    text: res.join('\n\n'),
+  };
 }
 
 /**

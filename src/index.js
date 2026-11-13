@@ -17,7 +17,7 @@
  *
  * 「遗忘」的动作：L4/L5 不进上下文，但文件照旧留着，需要时按上面那条链去翻。
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 /**
@@ -165,12 +165,48 @@ const MAX_L1 = 12, MAX_L2 = 20, MAX_L3 = 8, INDEX_DAYS = 10;
 const PAD = (n) => String(n).padStart(2, '0');
 const dayOf = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${PAD(d.getMonth() + 1)}-${PAD(d.getDate())}`; };
 
+/**
+ * 流水目录的「指纹」：文件名 + 大小 + mtime。
+ *
+ * 只要没有文件被新增/改写/删除，指纹就不变 —— 可以复用上一次的聚类结果。
+ * 这是唯一随数据量线性变差的地方：1.2MB 时单次 build 约 70ms，
+ * 而 read() 每步都会调一次，等于每步都付 70ms。
+ */
+function memFingerprint(dir) {
+  if (!existsSync(dir)) return 'missing';
+  const parts = [];
+  for (const fn of readdirSync(dir)) {
+    if (!/^\d{4}-\d{2}-\d{2}\.md$/.test(fn)) continue;
+    try {
+      const st = statSync(join(dir, fn));
+      parts.push(`${fn}:${st.size}:${st.mtimeMs}`);
+    } catch { /* 读不到就跳过，下次指纹自然会变 */ }
+  }
+  parts.sort();
+  return parts.join('|') + '#' + dir;
+}
+
+/** 上一次聚类的中间结果。聚类只依赖文件内容，不依赖 now。 */
+let cachedCluster = null;
+
 function build(now = Date.now()) {
   // 用户可能在设置页改了 memoryDir —— live 引用会立刻变，但目录得有人建。
   // apply 时建过一次，之后每次 build 再确认一下（目录已存在时只是一次 stat）。
   ensureConfiguredDir();
-  const entries = readEntries(memDir());
-  const events = clusterEvents(entries);
+  const dir = memDir();
+
+  // 指纹没变就复用聚类结果。访问计数和分级不缓存 —— 它们取决于 now
+  // 和 _access.json，每次都得重算。
+  // _access.json 的 mtime 也压进指纹：查过一条记忆后 ranking 要跟着变。
+  let accessStamp = '';
+  try { accessStamp = String(statSync(accessFile()).mtimeMs); } catch { accessStamp = 'none'; }
+  const fp = memFingerprint(dir) + '@' + accessStamp;
+
+  if (cachedCluster === null || cachedCluster.fp !== fp) {
+    const entries = readEntries(dir);
+    cachedCluster = { fp, entries, events: clusterEvents(entries) };
+  }
+  const { entries, events } = cachedCluster;
   // 访问证据：这个事件下所有 id 的累计被查次数
   const accessFn = (ev) => sumAccess(accessFile(), ev.ids || []);
   const graded = gradeEvents(events, now, accessFn);
