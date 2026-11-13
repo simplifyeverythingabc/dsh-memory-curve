@@ -71,5 +71,74 @@ jobs:
             if (bad.length) { console.error('有事件没分级'); process.exit(1); }
             console.log('OK');
           "
+
       - name: 检索质量基准
+        env:
+          MC_BENCH_ROOT: /tmp
         run: node tools/bench.mjs
+
+  selftest:
+    name: 接口自检
+    runs-on: ubuntu-latest
+    needs: syntax
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # src/index.js 用的是静态 import '@deepseek-ai/schemastery'，
+      # 这个包只有 DSH 宿主里有。CI 里造一个最小 stub —— 只够让
+      # z.object/z.string/z.number 的链式调用成立，不是真实现。
+      # 有了它，selftest 才能在干净环境里跑，把「接口形状对不对」纳入 CI。
+      - name: 造 schemastery stub
+        run: |
+          mkdir -p node_modules/@deepseek-ai/schemastery
+          cat > node_modules/@deepseek-ai/schemastery/package.json <<'EOF'
+          {
+            "name": "@deepseek-ai/schemastery",
+            "version": "0.0.0",
+            "type": "module",
+            "main": "index.js"
+          }
+          EOF
+          cat > node_modules/@deepseek-ai/schemastery/index.js <<'EOF'
+          const mk = (type, meta = {}) => {
+            const fn = (v) => (v === undefined ? meta.default : v);
+            fn.type = type;
+            fn.meta = meta;
+            fn.dict = undefined;
+            fn.default = (d) => mk(type, { ...meta, default: d });
+            fn.description = (s) => mk(type, { ...meta, description: s });
+            fn.volatile = () => mk(type, { ...meta, volatile: true });
+            fn.toJSON = () => ({ type, meta });
+            return fn;
+          };
+          const z = {
+            string: () => mk('string'),
+            number: () => mk('number'),
+            object: (dict) => {
+              const fn = (v) => v;
+              fn.type = 'object';
+              fn.meta = { default: {} };
+              fn.dict = dict;
+              fn.toJSON = () => ({ type: 'object', meta: fn.meta, dict });
+              return fn;
+            },
+          };
+          export default z;
+          EOF
+
+      - name: 接口自检（18 项）
+        env:
+          DSH_HOME: /tmp/dsh-home-ci
+          MC_SELFTEST_ROOT: /tmp
+        run: node tools/selftest.mjs
+
+      - name: 汇总数据完整性
+        run: |
+          mkdir -p /tmp/mem2
+          cp /tmp/memory/*.md /tmp/mem2/ 2>/dev/null || true
+          echo "（verify-ids 需要真实摘要，CI 只验语法和退出码路径）"
+          node --check tools/verify-ids.mjs
