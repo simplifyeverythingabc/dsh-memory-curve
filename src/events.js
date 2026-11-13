@@ -7,13 +7,13 @@
  *   密度和最后提及时间上，这些恰恰是遗忘曲线的作用对象。
  *
  * 算法：
- *   1. 读 D:\memory\YYYY-MM-DD.md，切成条目（日期 + 时间 + 说话人）
+ *   1. 读 <记忆目录>/YYYY-MM-DD.md，切成条目（日期 + 时间 + 说话人）
  *   2. 相邻条目：时间间隔 ≤ GAP_MIN 且共享关键词 → 归入同一事件
  *   3. 事件强度 S = ln(1+条数) × (1 + 0.35·ln(1+跨度天数)) × (1 + 密度加成)
  *   4. 留存 R = exp(−距今小时 ÷ (S × 24))
  *   5. 分级 L1/L2/L3/L4/L5
  *
- * 注入只给 L1+L2（+部分 L3）的梗概，完整内容永远留在 D:\memory。
+ * 注入只给 L1+L2（+部分 L3）的梗概，完整内容永远留在记忆目录里。
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -294,6 +294,7 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8 } = 
   // 给三个时间桶各留保底名额，桶内按 S 竞争，剩余名额再跨桶抢。
   const DAY = 86400000;
   const layered = (pool, total, quota) => {
+    if (total <= 0) return [];          // maxLx=0 要真的是一条都不给
     const now = Date.now();
     const b = { today: [], week: [], older: [] };
     for (const g of pool) {
@@ -302,14 +303,17 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8 } = 
     }
     const byS = (arr) => arr.slice().sort((x, y) => y.S - x.S);
     const out = [];
+    // 配额从总预算里扣：桶里能拿的不能超过「还剩多少名额」，
+    // 否则 maxL1=8 时三个桶照样各取 4 条，配了个寂寞。
     for (const k of ['today', 'week', 'older']) {
-      out.push(...byS(b[k]).slice(0, quota[k] || 0));
+      const room = Math.max(total - out.length, 0);
+      out.push(...byS(b[k]).slice(0, Math.min(quota[k] || 0, room)));
     }
     // 剩余名额跨桶按 S 竞争
     const got = new Set(out.map((g) => g.idx));
     const rest = byS(pool.filter((g) => !got.has(g.idx)));
     while (out.length < total && rest.length) out.push(rest.shift());
-    return out.sort((a, b2) => a.startAt - b2.startAt);   // 输出按时间排，读起来顺
+    return out.slice(0, total).sort((a, b2) => a.startAt - b2.startAt);   // 输出按时间排，读起来顺
   };
 
   const l1 = layered(by('L1'), maxL1, { today: 4, week: 4, older: 4 });

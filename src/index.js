@@ -2,8 +2,8 @@
  * dsh-memory-curve —— 按遗忘曲线给记忆事件分级 + 每日摘要 + 原文反查
  *
  * 三层结构：
- *   D:\memory\YYYY-MM-DD.md          完整流水（一字不删）
- *   D:\memory\_摘要\YYYY-MM-DD.md    每日摘要（事件清单 + 首尾句 + 关键词）
+ *   <记忆目录>/YYYY-MM-DD.md             完整流水（一字不删，目录可配）
+ *   <DSH_HOME>/memory-notes/_digest/…    每日摘要（事件清单 + 首尾句 + 关键词）
  *   注入上下文                       日期索引 + 高留存事件标题
  *
  * 检索顺序（照用户定的来）：
@@ -31,6 +31,7 @@ import { homedir } from 'node:os';
  */
 import z from '@deepseek-ai/schemastery';
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
+import { resolveMemDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL } from './access.js';
 
@@ -73,7 +74,7 @@ let liveConfig = null;
  * 读一个配置字段。
  *
  * `.volatile()` 字段由 Loader 包成 live 引用（`{ get() }`）交给插件，
- * 不是裸值 —— 这样 Settings 提交时会就地更新，改动直接到达运行中的插件。
+ * 不是裸值 —— { get() } 只可能来自 Loader 的 volatile 包装，或根本不出现。
  * 所以每次都得解引用，不能缓存成字符串。
  */
 function readField(field, fallback) {
@@ -114,8 +115,8 @@ let lastEnsuredDir = null;
 /** 只在「用户显式配置了路径」时创建它。
  *  没配置就不创建 —— 插件不该在你磁盘上悄悄留东西。
  *
- *  带缓存：同一路径只处理一次。用户在设置页改动 memoryDir 后，live 引用指向
- *  新路径，这里会因为路径变了而重新处理。 */
+ *  带缓存：同一路径只处理一次。如果 Loader 把 memoryDir 包成 live 引用，路径变了
+ *  这里会重新处理一遍。 */
 const ensureConfiguredDir = () => {
   const dir = configuredMemDir();
   if (!dir) { lastEnsuredDir = null; return; }
@@ -139,6 +140,9 @@ const ensureConfiguredDir = () => {
  *    4. D:\memory             —— Windows 老用户的历史位置，存在就用
  *    5. <DSH_HOME>/memory     —— 跨平台默认值
  *
+ * 4/5 两条的判定在 src/paths.js 的 resolveMemDir() 里，三个 tools 共用同一份 ——
+ * 别再在这里写第二套回退，否则「插件读 A、脚本写 B」这种错位会重新长出来。
+ *
  * 配置了路径时顺带确保目录存在 —— 不只 build() 走这条路，像 memory_curve_days
  * 这种直接调 listDays 的工具也经过这里。
  */
@@ -148,11 +152,7 @@ const memDir = () => {
     ensureConfiguredDir();
     return configured;
   }
-  const explicit = process.env.DSH_MEMORY_DIR || process.env.MEMORY_GALAXY_DIR;
-  if (explicit) return explicit;
-  const legacy = 'D:\\memory';
-  try { if (existsSync(legacy)) return legacy; } catch { /* 无权限时忽略 */ }
-  return join(dshHome(), 'memory');
+  return resolveMemDir();
 };
 
 // 摘要固定在 <DSH_HOME>/memory-notes —— 和流水目录分开，流水可以在任何地方。
@@ -190,17 +190,15 @@ function memFingerprint(dir) {
 let cachedCluster = null;
 
 function build(now = Date.now()) {
-  // 用户可能在设置页改了 memoryDir —— live 引用会立刻变，但目录得有人建。
+  // 路径可能因为 Loader 的 live 引用而在运行时变化，目录得有人建。
   // apply 时建过一次，之后每次 build 再确认一下（目录已存在时只是一次 stat）。
   ensureConfiguredDir();
   const dir = memDir();
 
-  // 指纹没变就复用聚类结果。访问计数和分级不缓存 —— 它们取决于 now
-  // 和 _access.json，每次都得重算。
-  // _access.json 的 mtime 也压进指纹：查过一条记忆后 ranking 要跟着变。
-  let accessStamp = '';
-  try { accessStamp = String(statSync(accessFile()).mtimeMs); } catch { accessStamp = 'none'; }
-  const fp = memFingerprint(dir) + '@' + accessStamp;
+  // 指纹只取流水文件（名 + 大小 + mtime）。_access.json 不能进来 —— touch() 每次查询
+  // 都会写它，一旦进指纹，「查过一条再读」就会把缓存打掉，等于没缓存。
+  // 访问计数与分级本来每次都要按 now 重算，不需要靠指纹判断。
+  const fp = memFingerprint(dir);
 
   if (cachedCluster === null || cachedCluster.fp !== fp) {
     const entries = readEntries(dir);
@@ -265,12 +263,12 @@ function dayIndex(graded) {
 }
 
 export function apply(ctx, config = {}) {
-  if (config.disabled === true) return;
 
   // ── 记忆目录：cordis.patch.yml 里 config.memoryDir 那个 ──────────
   // Config 声明了 memoryDir，cordis.patch.yml 里的同名字段按它校验。
   // 字段标了 .volatile()，Loader 交给插件的是 live 引用（{ get() }），
-  // Settings 提交时就地更新 —— 所以这里存下 config，别缓存成字符串。
+  // 字段标了 .volatile()，Loader 可能交给插件的是 live 引用（{ get() }），
+  // readField() 会两种形态都吃 —— 所以这里存下 config，别缓存成字符串。
   liveConfig = config;
   ensureConfiguredDir();
 
@@ -285,7 +283,7 @@ export function apply(ctx, config = {}) {
   //
   // 以前这里拿一段本地拼的字符串做 includes 判断 —— 那是恒真的伪自检，
   // 什么也没验证。真正的断言在注册处：context 的 interpolate 选项和实际
-  // 传进去的值必须是 false。这里只在注册后回读一次并打印真实取值。
+  // 传进去的值必须是 false。这里打印注册时传入的常量值 —— 和 selftest 里对注册对象的断言互相印证。
 
   // 启动时补一次每日摘要（失败不影响注入）
   try {
@@ -313,7 +311,7 @@ export function apply(ctx, config = {}) {
         '',
         '查法：① 先看下面索引认出大致哪天 → memory_curve_day(日期) 读摘要；',
         '　　　② 问具体术语/偏移/文件名时别指望摘要里一定有那个词，直接 memory_search(关键词) 全流水搜；',
-        '　　　③ 拿到 id 后 memory_curve_raw(id) 取全文；事件头是范围时，用 memory_curve_raw(ids:["m_a..m_b"], pattern:"关键词") 在范围内二次缩小，别整段拉。',
+        '　　　③ 拿到 id 后 memory_curve_raw(id) 取全文；整个事件要一起看时用 memory_curve_raw(event:"e_日期_时分")，范围写法 m_a..m_b 只取首尾两条，别当「整段」用。',
         '**回答涉及记忆时必须带 id 或日期**，没查到就说没查到，不许凭标题编。',
         '状态：热=默认召回　冷=降权但可查　档=只留索引（原文仍在）。',
         '用户问「之前/以前/记不记得/上次」这类遗忘型问题时，冷和档都要查，不要只看热的。',
