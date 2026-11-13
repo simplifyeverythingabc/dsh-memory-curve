@@ -85,7 +85,7 @@ jobs:
 
       # src/index.js 用的是静态 import '@deepseek-ai/schemastery'，
       # 这个包只有 DSH 宿主里有。CI 里造一个最小 stub —— 只够让
-      # z.object/z.string/z.number 的链式调用成立，不是真实现。
+      # z.object/z.string/z.number/z.boolean 与 default/description/volatile/min/max 链式调用成立，不是真实现。
       # 有了它，selftest 才能在干净环境里跑，把「接口形状对不对」纳入 CI。
       - name: 造 schemastery stub
         run: |
@@ -107,12 +107,16 @@ jobs:
             fn.default = (d) => mk(type, { ...meta, default: d });
             fn.description = (s) => mk(type, { ...meta, description: s });
             fn.volatile = () => mk(type, { ...meta, volatile: true });
+            // 数值约束：真 schemastery 支持链式调用；stub 接受并记录元数据。
+            fn.min = (n) => mk(type, { ...meta, min: n });
+            fn.max = (n) => mk(type, { ...meta, max: n });
             fn.toJSON = () => ({ type, meta });
             return fn;
           };
           const z = {
             string: () => mk('string'),
             number: () => mk('number'),
+            boolean: () => mk('boolean'),
             object: (dict) => {
               const fn = (v) => v;
               fn.type = 'object';

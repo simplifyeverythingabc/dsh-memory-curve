@@ -347,7 +347,19 @@ try {
   console.log('');
   console.log(`  检查项 ${rows.length}　通过 ${rows.length - failed}　失败 ${failed}`);
 } catch (e) {
-  console.log(`  ✗ 致命错误: ${e.message}`);
+  const msg = String((e && e.message) || e);
+  if (e && e.code === 'ERR_MODULE_NOT_FOUND' && msg.includes('@deepseek-ai/schemastery')) {
+    console.log('  ✗ 致命错误: 缺少 @deepseek-ai/schemastery');
+    console.log('    仓库目录请先按 .github/workflows/ci.yml 的「造 schemastery stub」那段造 stub，');
+    console.log('    或到部署目录（宿主已提供该包）里跑。');
+  } else if (/is not a function/.test(msg)) {
+    const m = msg.match(/z\.([A-Za-z_$][\w$]*) is not a function/);
+    console.log(`  ✗ 致命错误: schemastery stub 缺 z.${m ? m[1] : '<方法>'}()`);
+    console.log('    stub 需要提供 string / number / boolean / object，');
+    console.log('    以及 default / description / volatile / min / max 链式方法。');
+  } else {
+    console.log(`  ✗ 致命错误: ${msg}`);
+  }
   if (process.env.MC_SELFTEST_DEBUG) console.error(e);
   failed++;
 } finally {
