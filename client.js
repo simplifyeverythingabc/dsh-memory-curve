@@ -442,12 +442,20 @@
             return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px', padding: '4px 0' } }, children);
           }
 
+          /**
+           * 当前页面的注销函数。
+           *
+           * 必须放在模块作用域：mountPage 会被调用两次（apply 一次，
+           * whileServed 回调再一次），如果 live 是函数内变量，两次都看到 null，
+           * 就会向同一个槽位注册两遍 —— 报 "already has an entry with id"。
+           */
+          var liveMount = null;
+
           /** 把一个页面注册进 settings.section，返回注销函数。 */
           function mountPage(ctx) {
-            var live = null;
             try {
               ctx.slots.inject(SLOT, function () {
-                if (live !== null) return live;
+                if (liveMount !== null) return liveMount;
                 var dispose;
                 try {
                   dispose = ctx.slots.register({
@@ -463,10 +471,10 @@
                   return function () {};
                 }
                 if (typeof dispose !== 'function') return function () {};
-                live = function () {
-                  try { dispose(); } catch (err) { warn(err); } finally { live = null; }
+                liveMount = function () {
+                  try { dispose(); } catch (err) { warn(err); } finally { liveMount = null; }
                 };
-                return live;
+                return liveMount;
               });
             } catch (err) {
               warn(err);
