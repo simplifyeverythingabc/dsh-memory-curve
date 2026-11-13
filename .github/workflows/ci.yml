@@ -21,13 +21,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      - name: 逐个检查源码语法
-        run: |
-          set -e
-          for f in src/*.js tools/*.mjs; do
-            echo "checking $f"
-            node --check "$f"
-          done
+      - name: 源码语法（扫目录，与本地同一条路径）
+        run: node tools/check.mjs
 
       - name: 检查 package.json 合法性
         run: node -e "const p=require('./package.json'); if(!p.name||!p.version||!p.exports) process.exit(1); console.log(p.name, p.version)"

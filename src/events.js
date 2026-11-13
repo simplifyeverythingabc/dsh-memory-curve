@@ -278,7 +278,7 @@ export const LEVEL_NAME = {
 };
 
 /** 生成注入用的精简文本：L1 给标题，L2/L3 各给一行 */
-export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8 } = {}) {
+export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, now = Date.now() } = {}) {
   const by = (lv) => graded.filter((g) => g.level === lv);
   // 标题用事件首句（人话），主题词只做补充。
   // 之前用 topics 拼接，结果全是 7811/dock/catch 这种技术碎片，看不出是什么事。
@@ -295,7 +295,6 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8 } = 
   const DAY = 86400000;
   const layered = (pool, total, quota) => {
     if (total <= 0) return [];          // maxLx=0 要真的是一条都不给
-    const now = Date.now();
     const b = { today: [], week: [], older: [] };
     for (const g of pool) {
       const age = (now - g.startAt) / DAY;
@@ -317,8 +316,9 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8 } = 
   };
 
   const l1 = layered(by('L1'), maxL1, { today: 4, week: 4, older: 4 });
-  const l2 = by('L2').slice(-maxL2);
-  const l3 = by('L3').slice(-maxL3);
+  // slice(-0) 等价 slice(0)，会把全部返回 —— maxL2=0 必须真的是一条都不给
+  const l2 = maxL2 > 0 ? by('L2').slice(-maxL2) : [];
+  const l3 = maxL3 > 0 ? by('L3').slice(-maxL3) : [];
   if (l1.length) out.push('【L1 核心事件 · 常驻】', ...l1.map(line));
   if (l2.length) out.push('', '【L2 长期事件】', ...l2.map(line));
   if (l3.length) out.push('', '【L3 活跃事件 · 只留索引】', ...l3.map(line));
@@ -341,7 +341,7 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8 } = 
   const isChat = (g) => /\[QQ(私聊|群)?\]/.test((g.head || '') + (g.texts || []).join('').slice(0, 200));
 
   const olderPool = graded
-    .filter((g) => (Date.now() - g.startAt) / DAY2 >= 7)
+    .filter((g) => (now - g.startAt) / DAY2 >= 7)
     .map((g) => ({ g, w: g.S * (isChat(g) ? 0.25 : 1) * (1 + technicality(g)) }))
     .sort((a, b) => b.w - a.w)
     .slice(0, 4)

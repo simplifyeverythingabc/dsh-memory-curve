@@ -17,9 +17,8 @@
  *
  * 「遗忘」的动作：L4/L5 不进上下文，但文件照旧留着，需要时按上面那条链去翻。
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 /**
  * schemastery 是 DSH 自带的包，宿主环境里必有。
  *
@@ -31,7 +30,7 @@ import { homedir } from 'node:os';
  */
 import z from '@deepseek-ai/schemastery';
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
-import { resolveMemDir } from './paths.js';
+import { resolveMemDir, dshHome, normalizeDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL } from './access.js';
 
@@ -47,6 +46,10 @@ export const inject = ['systemPrompt', 'tools'];
  * 依赖，能正常解析）+ z.object(...)。
  */
 export const Config = z.object({
+  disabled: z
+    .boolean()
+    .default(false)
+    .description('设 true 时 apply() 直接返回：不注册任何工具，也不注入上下文。用于临时停用而不卸载。'),
   memoryDir: z
     .string()
     .default('')
@@ -59,7 +62,6 @@ export const Config = z.object({
   maxL3: z.number().default(8).description('L3 事件最多列几条。'),
 });
 
-const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
 
 /**
  * context 的插值开关。必须是 false —— 见注册处的注释。
@@ -82,29 +84,6 @@ function readField(field, fallback) {
   return value === undefined ? fallback : value;
 }
 
-/**
- * 把用户填的路径变成可用的绝对路径。
- *
- * 支持几种常见写法，免得用户填 `%USERPROFILE%\memory` 或者 `~/memory`
- * 之后发现目录建到了奇怪的地方：
- *   - 前后空白       自动去掉
- *   - `~` / `~/x`    展开成用户主目录
- *   - `%VAR%`        展开成环境变量（Windows 习惯）
- *   - `$VAR`/`${VAR}` 同上（Unix 习惯）
- *   - 相对路径        按进程当前目录转绝对
- */
-function normalizeDir(input) {
-  let s = String(input ?? '').trim();
-  if (!s) return '';
-  if (s === '~') s = homedir();
-  else if (s.startsWith('~/') || s.startsWith('~\\')) s = join(homedir(), s.slice(2));
-  s = s.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (m, k) => process.env[k] ?? m);
-  s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
-    (m, a, b) => process.env[a ?? b] ?? m);
-  try { return resolve(s); } catch { return s; }
-}
-
-/** Config 里配的记忆目录（已规范化）。空串表示没配。 */
 function configuredMemDir() {
   return normalizeDir(readField(liveConfig?.memoryDir, ''));
 }
@@ -263,10 +242,15 @@ function dayIndex(graded) {
 }
 
 export function apply(ctx, config = {}) {
+  // 临时停用开关。Config 里声明了 disabled，patch 里写 disabled: true 会先过 schema 校验，
+  // 到这里的值是布尔 —— 不会再出现「加了守卫但永远拿到 undefined」那种假守卫。
+  if (config.disabled === true) {
+    console.log('[memory-curve] disabled=true，跳过全部注册');
+    return;
+  }
 
   // ── 记忆目录：cordis.patch.yml 里 config.memoryDir 那个 ──────────
   // Config 声明了 memoryDir，cordis.patch.yml 里的同名字段按它校验。
-  // 字段标了 .volatile()，Loader 交给插件的是 live 引用（{ get() }），
   // 字段标了 .volatile()，Loader 可能交给插件的是 live 引用（{ get() }），
   // readField() 会两种形态都吃 —— 所以这里存下 config，别缓存成字符串。
   liveConfig = config;

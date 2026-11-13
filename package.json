@@ -54,6 +54,7 @@
   "scripts": {
     "check": "node tools/check.mjs",
     "verify": "node tools/verify-ids.mjs",
+    "verify:strict": "node tools/verify-ids.mjs --strict",
     "selftest": "node tools/selftest.mjs",
     "build": "node tools/build-dailies.mjs"
   }

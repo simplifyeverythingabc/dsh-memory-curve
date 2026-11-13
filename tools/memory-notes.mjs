@@ -20,18 +20,9 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import zlib from 'node:zlib';
 
-// 会话日志目录：DSH_HOME/sessions
-const DSH_HOME = process.env.DSH_HOME
-  || path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh');
-const SESSIONS = path.join(DSH_HOME, 'sessions');
-
-// 流水输出目录 —— 与插件 src/index.js 的 memDir() 必须是同一个值，否则生成的内容
-// 插件读不到（早期版本踩过：这里写 memory-notes、插件读 D:\memory，中间靠手写 ps1
-// 同步，别人装完根本用不了）。
+// 会话日志目录与流水目录都从 src/paths.js 取 —— 那是唯一真相。
 //
-// 唯一真相在 src/paths.js 的 resolveMemDir()。tools 可能脱离插件包部署，
-// 所以就地在两种目录形态里找 src/。
-//
+// tools 可能脱离插件包部署，所以就地在两种目录形态里找 src/。
 // D:\memory 的「可写性」不在这里判断 —— 由下面的 assertWritable() 显式报错，
 // 不做静默改写到别处，那正是「写一个读另一个」的来源。
 const SRC_BASES = ['../src/', '../profiles/desktop/node_modules/dsh-memory-curve/src/'];
@@ -47,8 +38,14 @@ async function loadSrc(name) {
   process.exit(1);
 }
 
-const { resolveMemDir } = await loadSrc('paths.js');
+const { resolveMemDir, dshHome } = await loadSrc('paths.js');
 
+const DSH_HOME = dshHome();
+const SESSIONS = path.join(DSH_HOME, 'sessions');
+
+// 流水输出目录 —— 必须和插件 src/index.js 的 memDir() 算出同一个值，否则生成的内容
+// 插件读不到（早期版本踩过：这里写 memory-notes、插件读 D:\memory，中间靠手写 ps1
+// 同步，别人装完根本用不了）。
 const OUT = resolveMemDir();
 
 // 提前探测可写性，别等跑到一半才 EPERM

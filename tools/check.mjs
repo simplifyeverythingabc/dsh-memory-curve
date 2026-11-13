@@ -35,6 +35,18 @@ if (targets.length === 0) {
   process.exit(1);
 }
 
+// 只防「0 个文件」不够：目录改名、后缀改了，会扫到 1 个文件并全绿。
+// 断言几个必需文件在不在，比断言数字稳 —— 数字会过期，文件名不会。
+const REQUIRED = [
+  'src/index.js', 'src/events.js', 'src/digest.js', 'src/access.js', 'src/paths.js',
+  'tools/check.mjs', 'tools/selftest.mjs', 'tools/verify-ids.mjs',
+];
+const missing = REQUIRED.filter((r) => !targets.some((p) => p.replace(/\\/g, '/').endsWith(r)));
+if (missing.length) {
+  console.error(`缺少必需文件，检查目录结构：${missing.join(', ')}`);
+  process.exit(1);
+}
+
 let bad = 0;
 for (const p of targets) {
   const rel = relative(root, p).replace(/\\/g, '/');

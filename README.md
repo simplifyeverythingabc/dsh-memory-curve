@@ -97,12 +97,12 @@ pnpm add file:./path/to/dsh-memory-curve
     - id: memory-curve
       name: dsh-memory-curve
       config:
-        maxT1: 12      # T1 最多列几条
-        maxT2: 20      # T2 最多列几条
-        maxT3: 8       # T3 只留索引
+        maxL1: 12      # L1 最多列几条
+        maxL2: 20      # L2 最多列几条
+        maxL3: 8       # L3 只留索引
 ```
 
-重启 DSH，看到 `[memory-curve] 自检通过` 就成了。
+重启 DSH，看到 `[memory-curve] context 注册: interpolate=false` 就成了。
 
 ---
 
@@ -134,6 +134,10 @@ export DSH_MEMORY_DIR="$HOME/memory"
 **设完要重开命令行和 DSH**（`setx` 只影响新进程）。
 
 想搬目录就用这条，四边一起跟着变。
+
+### 临时停用
+
+在 profile patch 里给 memory-curve 那行加 \disabled: true\，重启后记忆插件不注册任何工具、也不注入上下文。想恢复就删掉那行或改成 false。
 
 ### 或者在 profile 里覆盖（只影响插件）
 
@@ -274,7 +278,7 @@ const digestDir = 'C:/Users/you/.dsh/memory-notes/_digest';
 
 const entries = readEntries(memDir);
 const graded = gradeEvents(clusterEvents(entries));
-const index = renderForPrompt(graded, { maxT1: 12, maxT2: 20, maxT3: 8 });
+const index = renderForPrompt(graded, { maxL1: 12, maxL2: 20, maxL3: 8 });
 
 const days = listDays({ memDir, digestDir });                          // string[]
 const md = readDigest({ digestDir, day: '2026-11-11' });              // string | null
@@ -321,6 +325,22 @@ readDigest(digestDir, '2026-11-11')
 - `text` 里**含首行**（时间 + 说话人），原样取出来就能直接展示
 
 只返回 `text` 的话，前两样每次都得重新解析。
+## 校验的严格程度
+
+`node tools/verify-ids.mjs` 默认只把**结构损坏**（标记不配对、AUTO 区重复）、**悬空引用**、**条数不符**算失败。
+这三类都是确定的错，红了就是真有问题。
+
+膨胀倍数、锚点重复率这类启发式判据只打印「疑似异常」，不影响退出码 —— 它们会被正常的对话量波动误伤，
+混进退出码只会逼人加 `|| true`，校验就废了。
+
+需要严格时：
+
+```bash
+npm run verify:strict        # 等价于 node tools/verify-ids.mjs --strict
+```
+
+此时上面那些疑似项也升级为失败。日常用默认，发布前跑一次 strict。
+
 ## 验证它能不能跑
 
 仓库里带了个自检脚本，不需要 DSH 在运行，也不碰你的真实数据：

@@ -243,19 +243,26 @@ try {
   // 而默认 12 恰好等于 4+4+4，所以 maxL1 配小了完全没效果。
   try {
     const { renderForPrompt } = await import('../src/events.js');
-    const base = Date.now() - 3600000;
+    const FIXED = Date.now();   // 传进去固定住，避免跨午夜翻桶
+    const base = FIXED - 3600000;
+    const mk = (idx, level, offset) => ({
+      idx, level, startAt: base + offset, count: 2, S: 8, head: '事件' + idx,
+    });
     const fake = [
-      { idx: 0, level: 'L1', startAt: base,      count: 3, S: 9, head: '甲' },
-      { idx: 1, level: 'L1', startAt: base + 60, count: 2, S: 8, head: '乙' },
+      mk(0, 'L1', 0), mk(1, 'L1', 60),
+      mk(2, 'L2', 120), mk(3, 'L2', 180),
+      mk(4, 'L3', 240), mk(5, 'L3', 300),
     ];
-    const t0 = renderForPrompt(fake, { maxL1: 0, maxL2: 0, maxL3: 0 });
-    if (t0.includes('L1 核心事件')) {
-      fail('分级上限生效', `maxL1=0 仍注入了 L1 段`);
+
+    const zero = renderForPrompt(fake, { maxL1: 0, maxL2: 0, maxL3: 0, now: FIXED });
+    const leaks = ['L1 核心事件', 'L2 长期事件', 'L3 活跃事件'].filter((s) => zero.includes(s));
+    if (leaks.length) {
+      fail('分级上限生效', `maxLx=0 仍注入了：${leaks.join(' / ')}`);
     } else {
-      const t2 = renderForPrompt(fake, { maxL1: 2, maxL2: 0, maxL3: 0 });
-      const n = (t2.match(/^- /gm) || []).length;
-      if (n !== 2) fail('分级上限生效', `maxL1=2 应得 2 条，实得 ${n}`);
-      else ok('分级上限生效', 'maxL1=0 段消失，maxL1=2 得 2 条');
+      const two = renderForPrompt(fake, { maxL1: 2, maxL2: 2, maxL3: 2, now: FIXED });
+      const n = (two.match(/^- /gm) || []).length;
+      if (n !== 6) fail('分级上限生效', `三个 2 应得 6 条，实得 ${n}`);
+      else ok('分级上限生效', 'maxLx=0 三段全消失，都设 2 得 6 条');
     }
   } catch (e) {
     fail('分级上限生效', e.message.slice(0, 80));

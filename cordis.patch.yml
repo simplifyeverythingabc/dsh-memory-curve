@@ -13,3 +13,5 @@
         maxL1: 12
         maxL2: 20
         maxL3: 8
+        # memoryDir: D:\memory   # 只影响插件读；三个采集/校验脚本请用 DSH_MEMORY_DIR
+        # disabled: true         # 临时停用：不注册工具也不注入

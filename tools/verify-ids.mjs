@@ -14,9 +14,9 @@ const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 // tools 可能脱离插件包部署，所以按两种形态就地查找。
 const SRC_BASES = ['../src/', '../profiles/desktop/node_modules/dsh-memory-curve/src/'];
 const errs = [];
-let resolveMemDir;
+let resolveMemDir, dshHome;
 for (const base of SRC_BASES) {
-  try { ({ resolveMemDir } = await import(base + 'paths.js')); break; }
+  try { ({ resolveMemDir, dshHome } = await import(base + 'paths.js')); break; }
   catch (e) { errs.push(`  ${base}paths.js → ${e.message}`); }
 }
 if (!resolveMemDir) {
@@ -26,7 +26,7 @@ if (!resolveMemDir) {
 }
 
 const MEM = resolveMemDir();
-const DIG = join(DSH_HOME, 'memory-notes', '_digest');
+const DIG = join(dshHome(), 'memory-notes', '_digest');
 
 // 两个目录都先确认存在 —— 否则下面第一句 readdirSync 就是一段 ENOENT 栈，
 // 看不出是「路径配错」还是「还没采集」。
@@ -106,13 +106,15 @@ for (const fn of readdirSync(DIG)) {
       return m2 && /^\d{6}$/.test(m2[1]) ? Number(m2[1]) : null;
     };
     const s1 = seqOf(first), s2 = last ? seqOf(last) : null;
-    const declared = (s1 !== null && s2 !== null && s2 >= s1) ? (s2 - s1 + 1) : (plusN + 1);
+    // 算得出来才核对；算不出来（哈希端点）返回 null，只核端点存在性。
+    // 报一个错的数比不报更糟 —— 它会让人开始不信整个校验器。
+    const declared = (s1 !== null && s2 !== null && s2 >= s1) ? (s2 - s1 + 1) : null;
     const at = m.index ?? 0;
     const ctxStart = raw.lastIndexOf('\n## ', at);
     if (ctxStart >= 0) {
       const seg = raw.slice(ctxStart, at);
       const hm = HEADCNT_RE.exec(seg);
-      if (hm && Number(hm[1]) !== declared) {
+      if (hm && declared !== null && Number(hm[1]) !== declared) {
         rangeBad.push({ file: fn, id: first, declared, claimed: Number(hm[1]) });
       }
     }

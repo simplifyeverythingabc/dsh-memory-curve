@@ -28,11 +28,11 @@ async function loadSrc(name) {
 }
 
 const { buildDailies } = await loadSrc('digest.js');
-const { resolveMemDir } = await loadSrc('paths.js');
+const { resolveMemDir, dshHome } = await loadSrc('paths.js');
 
 // 流水目录与插件、memory-notes.mjs 同一套（src/paths.js）。
 const MEM = resolveMemDir();
-const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
+const DSH_HOME = dshHome();
 const DIG = join(DSH_HOME, 'memory-notes', '_digest');
 
 try {
