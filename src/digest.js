@@ -4,8 +4,8 @@
  * 目标：给每一天生成一份「事件级摘要」，作为完整流水与上下文索引之间的中间层。
  *
  * 三层结构：
- *   D:\memory\YYYY-MM-DD.md          完整流水（一字不删，永久）
- *   D:\memory\_摘要\YYYY-MM-DD.md    每日摘要（事件清单 + 首尾句 + 关键词）
+ *   <记忆目录>/YYYY-MM-DD.md             完整流水（一字不删，永久）
+ *   <DSH_HOME>/memory-notes/_digest/…    每日摘要（事件清单 + 首尾句 + 关键词）
  *   注入上下文                       只有日期索引 + 高留存事件标题
  *
  * 检索路径：上下文索引 → 某日摘要 → 该日完整流水
@@ -17,7 +17,6 @@ import { readEntries, clusterEvents, gradeEvents, LEVEL_NAME, EN_STOP, cleanLine
 const MAX_EVENTS_PER_DAY = 14;   // 一天最多列这么多事件，超出只报数量
 const HEAD_CHARS = 60;
 const TAIL_CHARS = 60;
-const MAX_TOPICS = 6;
 
 const PAD = (n) => String(n).padStart(2, '0');
 const dayOf = (ms) => {
@@ -546,7 +545,6 @@ export function searchAll(arg) {
     return ids.some((id) => id !== selfId);
   };
 
-  const now = Date.now();
   // 状态权重：遗忘是降权不是隐藏。archived 仍能被搜到，只是排后面
   // （索引里写着「冷和档都要查」，如果直接过滤掉就自相矛盾了）。
   const STATE_W = { active: 1, cold: 0.7, archived: 0.4 };
@@ -560,7 +558,6 @@ export function searchAll(arg) {
     const coverage = use.length ? matched / use.length : 0;
     const hitScore = coverage * (Math.min(1 + Math.log2(Math.max(total, 1)), 4) / 4);
     const citeScore = cited.has(x.b.id) ? 1 : 0;
-    const ts = new Date(`${x.b.day}T${x.b.time}:00`).getTime();
     let score = 0.62 * hitScore + 0.38 * citeScore;
     // 转述让位于原始证据，但「结论类」摘要例外 ——
     // v29 SUCCESS 这种既像摘要又是最终答案，压下去等于把定稿藏了。
