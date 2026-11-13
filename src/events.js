@@ -274,10 +274,10 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
 }
 
 export const LEVEL_NAME = {
-  T1: 'T1 核心', T2: 'T2 长期', T3: 'T3 活跃', T4: 'T4 衰退', T5: 'T5 归档',
+  L1: 'L1 核心', L2: 'L2 长期', L3: 'L3 活跃', L4: 'L4 衰退', L5: 'L5 归档',
 };
 
-/** 生成注入用的精简文本：T1 给标题，T2/T3 各给一行 */
+/** 生成注入用的精简文本：L1 给标题，L2/L3 各给一行 */
 export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 10 } = {}) {
   const by = (lv) => graded.filter((g) => g.level === lv);
   // 标题用事件首句（人话），主题词只做补充。
@@ -315,9 +315,9 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 10 } =
   const l1 = layered(by('L1'), maxL1, { today: 4, week: 4, older: 4 });
   const l2 = by('L2').slice(-maxL2);
   const l3 = by('L3').slice(-maxL3);
-  if (l1.length) out.push('【T1 核心事件 · 常驻】', ...l1.map(line));
-  if (l2.length) out.push('', '【T2 长期事件】', ...l2.map(line));
-  if (l3.length) out.push('', '【T3 活跃事件 · 只留索引】', ...l3.map(line));
+  if (l1.length) out.push('【L1 核心事件 · 常驻】', ...l1.map(line));
+  if (l2.length) out.push('', '【L2 长期事件】', ...l2.map(line));
+  if (l3.length) out.push('', '【L3 活跃事件 · 只留索引】', ...l3.map(line));
 
   // 历史补位：>7 天的桶里常常一个 L1 都没有 —— 那几天数据稀疏，S 天然够不到
   // 全局阈值，结果「早期历史」永远不注入。这里不限等级，直接按 S 取最靠前的几条，

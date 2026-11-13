@@ -258,7 +258,7 @@ try {
   await run('memory_curve_build', () => tools.memory_curve_build.execute());
   const searchText = await run('memory_search', () => tools.memory_search.execute({ pattern: '连接池', maxHits: 3 }));
   await run('memory_curve_day', () => tools.memory_curve_day.execute({ day: '2026-01-15' }));
-  await run('memory_curve_show', () => tools.memory_curve_show.execute({ level: 'T1', maxChars: 300 }));
+  await run('memory_curve_show', () => tools.memory_curve_show.execute({ level: 'L1', maxChars: 300 }));
 
   const m = searchText.match(/m_\d{8}_[0-9a-f]{6}/);
   if (m) {
