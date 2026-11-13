@@ -17,49 +17,62 @@ import { join, resolve, isAbsolute } from 'node:path';
 /**
  * DSH 家目录。所有环境变量都从参数取，方便测试注入。
  *
- * 以前这里硬读 process.env，而 resolveMemDir(env) 的 env 参数只用于前两条优先级，
- * 最后一行仍然读 process.env.DSH_HOME —— 注入对 DSH_HOME 不生效，是个假的可测性。
- *
  * @param env - 环境变量来源，默认 process.env。
  */
 export const dshHome = (env = process.env) =>
   env.DSH_HOME || join(env.USERPROFILE || env.HOME || homedir(), '.dsh');
 
 /**
- * 把用户写的路径规范化：展开 ~、%VAR%、$VAR，统一分隔符，去掉尾斜杠。
+ * 把用户写的路径规范化：展开 ~、%VAR%、$VAR，统一分隔符，去尾斜杠，相对转绝对。
  *
- * 从 src/index.js 搬过来 —— Config 的 description 承诺支持这几种写法，
- * 但那只对 config 值生效。用户把同样的写法设进 DSH_MEMORY_DIR 时，
- * 以前会得到一个字面名叫 `%USERPROFILE%\memory` 的目录（Windows 上真会建出来），
- * 然后「插件读到一个空目录」。现在环境变量这条出口也过一遍规范化。
+ * 五个坑都在这一个函数里，改动时注意：
+ *
+ *   1. 变量展开和 ~ 用传入的 env，不是 process.env —— 否则 dshHome(env) 可注入、
+ *      这里不可注入，测试里展开的还是真实值，是假的可测性。
+ *   2. UNC 必须在压分隔符之前记下来：'\\server\share' 压完是 '/server/share'，
+ *      再判断就晚了 —— Windows 会把开头的 /server 当成当前盘的 \server。
+ *   3. 去尾斜杠要放过三种根：'/'（POSIX 根）、'//'（UNC 头）、'C:/'（盘符根）。
+ *      注意这时盘符根已经是 'C:/'，模式得带斜杠 —— 写 /^[A-Za-z]:$/ 永远匹配不到，
+ *      结果被削成 'C:'（Windows 上表示「C 盘当前目录」，不是根）。
+ *   4. 相对路径必须转绝对。搬进这个文件时漏过一次，后果是同一个 'memory'
+ *      被插件和 tools 解析成两个不同目录 —— 正是这个文件要消灭的问题。
  *
  * @param input - 原始路径字符串。
+ * @param env - 环境变量来源，默认 process.env。
  * @returns 规范化后的路径；输入为空时返回空串。
  */
-export function normalizeDir(input) {
+export function normalizeDir(input, env = process.env) {
   let s = String(input ?? '').trim();
   if (s === '') return '';
-  // %VAR%（Windows）
-  s = s.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (m, name) => process.env[name] ?? m);
-  // $VAR / ${VAR}
-  s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (m, a, b) => {
-    const name = a || b;
-    return process.env[name] ?? m;
-  });
-  // ~ 开头的家目录
+
+  // 1) 变量展开（Windows 的 %VAR%，Unix 的 $VAR / ${VAR}）
+  s = s.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (m, name) => env[name] ?? m);
+  s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+    (m, a, b) => env[a || b] ?? m);
+
+  // 2) ~ 开头的家目录，同样走 env
   if (s === '~' || s.startsWith('~/') || s.startsWith('~\\')) {
-    s = join(homedir(), s.slice(1).replace(/^[/\\]/, ''));
+    s = join(env.USERPROFILE || env.HOME || homedir(), s.slice(1).replace(/^[/\\]/, ''));
   }
-  // 统一分隔符、去尾斜杠
-  s = s.replace(/[\\/]+/g, '/').replace(/\/+$/, '');
-  // Windows 盘符写成 D:/memory，转回反斜杠更符合本机习惯
-  if (process.platform === 'win32' && /^[A-Za-z]:\//.test(s)) {
-    s = s.replace(/\//g, '\\');
-  }
+
+  // 3) UNC 先记标记，再统一分隔符
+  const unc = /^\\\\/.test(s);
+  s = s.replace(/[\\/]+/g, '/');
+  if (unc) s = '//' + s.replace(/^\/+/, '');
+
+  // 4) 去尾斜杠，放过三种根
+  if (s !== '/' && s !== '//' && !/^[A-Za-z]:\/$/.test(s)) s = s.replace(/\/+$/, '');
+
+  // 5) 盘符路径转回反斜杠（本机习惯）：'C:/memory' → 'C:\memory'
+  if (process.platform === 'win32' && /^[A-Za-z]:\//.test(s)) s = s.replace(/\//g, '\\');
+
+  // 6) 相对路径转绝对 —— 漏了这一步，'memory' 会在两个进程里指向两个目录
+  if (!isAbsolute(s)) s = resolve(s);
+
   return s;
 }
 
-/** resolveMemDir 的短缓存键：这三个变量不变，结果就不会变。 */
+/** resolveMemDir 的短缓存：这五个变量不变，结果就不会变。 */
 let cache = null;
 
 /**
@@ -69,12 +82,15 @@ let cache = null;
  * @returns 记忆目录的路径字符串。
  */
 export function resolveMemDir(env = process.env) {
-  const key = `${env.DSH_MEMORY_DIR || ''}|${env.MEMORY_GALAXY_DIR || ''}|${env.DSH_HOME || ''}`;
+  // USERPROFILE / HOME 也要进 key：dshHome(env) 在家目录上做兜底，
+  // 只覆盖前三个的话，换一个 USERPROFILE 仍然命中旧缓存。
+  const key = [env.DSH_MEMORY_DIR, env.MEMORY_GALAXY_DIR, env.DSH_HOME, env.USERPROFILE, env.HOME]
+    .map((x) => x || '').join('|');
   if (cache && cache.key === key) return cache.value;
 
   const value = (() => {
     const explicit = env.DSH_MEMORY_DIR || env.MEMORY_GALAXY_DIR;
-    if (explicit) return normalizeDir(explicit);
+    if (explicit) return normalizeDir(explicit, env);
     // 只在 Windows 上探 D 盘：POSIX 里 'D:\memory' 是一个合法文件名，
     // 万一 cwd 里真有这个名字，existsSync 会为真，随后 readdirSync 抛 ENOTDIR。
     if (process.platform === 'win32') {
