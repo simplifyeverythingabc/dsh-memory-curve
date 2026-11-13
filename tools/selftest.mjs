@@ -83,16 +83,29 @@ try {
 
   // Config 是可选导出：宿主环境（有 schemastery）里应该是有效 schema，
   // 非宿主环境里允许是 undefined —— 那是刻意的降级，不算失败。
+  // Config 是必需的：cordis.patch.yml 里的 config 段按它校验和补默认值。
+  // 设置面板已移除，所以不再要求 volatile 字段存在的理由（那本来是为了让面板渲染表单）——
+  // volatile 现在唯一的职责是让 Loader 把该字段包成 live 引用，值仍然来自 patch。
   const cfg = mod.Config;
   if (cfg === undefined) {
-    ok('Config 导出', 'undefined（无 schemastery，降级；宿主环境里才有）');
+    fail('Config 导出', 'undefined（宿主环境必须有）');
   } else if (cfg && cfg.type === 'object' && cfg.dict && typeof cfg.toJSON === 'function') {
-    const fields = Object.keys(cfg.dict);
-    const volatileFields = fields.filter((k) => cfg.dict[k]?.meta?.volatile);
-    ok('Config 导出', `${fields.length} 个字段，${volatileFields.length} 个 volatile`);
-    if (volatileFields.length === 0) {
-      fail('Config volatile', '没有 volatile 字段 → DSH 设置界面不会渲染表单');
+    const required = ['memoryDir', 'maxL1', 'maxL2', 'maxL3'];
+    const missing = required.filter((k) => !cfg.dict[k]);
+    if (missing.length) fail('Config 字段', '缺 ' + missing.join(', '));
+    else ok('Config 字段', required.join(', '));
+
+    const md = cfg.dict.memoryDir;
+    if (!md || md.type !== 'string') fail('memoryDir 类型', `应为 string，实际 ${md?.type}`);
+    else ok('memoryDir 类型', `string, default=${JSON.stringify(md.meta?.default)}`);
+
+    for (const k of ['maxL1', 'maxL2', 'maxL3']) {
+      const f = cfg.dict[k];
+      if (!f || f.type !== 'number') fail(`${k} 类型`, `应为 number，实际 ${f?.type}`);
     }
+    const badNums = ['maxL1', 'maxL2', 'maxL3'].filter((k) => typeof cfg.dict[k]?.meta?.default !== 'number');
+    if (badNums.length) fail('分级上限默认值', '应为数字：' + badNums.join(', '));
+    else ok('分级上限默认值', 'maxL1=12 maxL2=20 maxL3=8');
   } else {
     fail('Config 导出', `形状不对：${typeof cfg}`);
   }

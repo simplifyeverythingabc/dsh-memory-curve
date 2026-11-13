@@ -312,11 +312,15 @@ export function readById(arg) {
     const mm = HEAD.exec(line);
     if (mm) {
       if (cur) out.push(cur);
-      seq += 1;
+      // 兜底编号只给「缺锚点」的条目递增，与 events.js readEntries 保持一致。
+      // 以前这里每行都 seq++，混合文件里同一条旧条目会在两处算出不同 id，
+      // 表现为 readById 报「没有 id」。
+      const anchored = mm[4];
+      if (!anchored) seq += 1;
       cur = {
         head: line,
         body: [],
-        id: mm[4] || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`,
+        id: anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`,
       };
     } else if (cur) {
       cur.body.push(line);
@@ -356,7 +360,13 @@ export function readByIds(arg) {
  * 返回按日期倒序，每条带 id，方便继续用 readById 取全文。
  */
 
-/** 收集摘要里被引用过的 id（含范围展开），用于给命中加权 */
+/**
+ * 收集摘要里被引用过的 id，用于给命中加权。
+ *
+ * 注意：里面的 `m_a..m_b` 展开只对**旧格式**摘要有效 —— 哈希 id 之后
+ * 摘要写的是「覆盖: m_xxx +N（不连续）」，那段正则匹配不到。保留是为了
+ * 兼容历史摘要文件，新数据靠下面的全量 id 扫描兜住。
+ */
 function digestCited(digestDir) {
   const s = new Set();
   if (!digestDir || !existsSync(digestDir)) return s;
@@ -439,9 +449,11 @@ export function searchAll(arg) {
       const mm = HEAD.exec(line);
       if (mm) {
         if (cur) blocks.push(cur);
-        seq += 1;
+        // 同上：只给缺锚点的条目递增
+        const anchored = mm[4];
+        if (!anchored) seq += 1;
         cur = {
-          id: mm[4] || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`,
+          id: anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`,
           day, time: mm[2], body: [],
         };
       } else if (cur) cur.body.push(line);

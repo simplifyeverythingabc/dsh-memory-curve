@@ -29,8 +29,10 @@ for (const fn of readdirSync(MEM)) {
   for (const line of raw.split(/\r?\n/)) {
     const mm = HEAD.exec(line);
     if (!mm) continue;
-    seq += 1;
-    live.add(mm[1] || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`);
+    // 与 events.js readEntries 一致：兜底编号只给缺锚点的条目递增
+    const anchored = mm[1];
+    if (!anchored) seq += 1;
+    live.add(anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`);
   }
 }
 

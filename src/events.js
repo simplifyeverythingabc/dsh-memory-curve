@@ -278,7 +278,7 @@ export const LEVEL_NAME = {
 };
 
 /** 生成注入用的精简文本：L1 给标题，L2/L3 各给一行 */
-export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 10 } = {}) {
+export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8 } = {}) {
   const by = (lv) => graded.filter((g) => g.level === lv);
   // 标题用事件首句（人话），主题词只做补充。
   // 之前用 topics 拼接，结果全是 7811/dock/catch 这种技术碎片，看不出是什么事。

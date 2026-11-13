@@ -32,7 +32,7 @@ import { homedir } from 'node:os';
 import z from '@deepseek-ai/schemastery';
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
-import { touch, sumAccess, stateOf, STATE_LABEL, dump as dumpAccess } from './access.js';
+import { touch, sumAccess, stateOf, STATE_LABEL } from './access.js';
 
 export const name = 'memory-curve';
 
@@ -53,6 +53,9 @@ export const Config = z.object({
       '完整记忆存放目录。填了就用它（不存在会自动创建），支持 %USERPROFILE%\\memory、~/memory、D:/memory 这几种写法；留空则回退到 DSH_MEMORY_DIR 环境变量，再不行用 <DSH_HOME>/memory。',
     )
     .volatile(),
+  maxL1: z.number().default(12).description('L1 事件最多列几条，控制注入体积。'),
+  maxL2: z.number().default(20).description('L2 事件最多列几条。'),
+  maxL3: z.number().default(8).description('L3 事件最多列几条。'),
 });
 
 const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
@@ -198,7 +201,7 @@ function report(graded) {
 }
 
 /** 日期索引：最近 N 天，每天一行 */
-function dayIndex(graded, days) {
+function dayIndex(graded) {
   const byDay = new Map();
   for (const g of graded) {
     const d = dayOf(g.startAt);
@@ -264,7 +267,7 @@ export function apply(ctx, config = {}) {
       const body = renderForPrompt(graded, { maxL1, maxL2, maxL3 });
       const c = {};
       for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
-      const idx = dayIndex(graded, entries.length);
+      const idx = dayIndex(graded);
       return [
         '【记忆事件索引 · 按遗忘曲线】',
         `完整流水 ${memDir()}（${entries.length} 条 / ${events.length} 事件）`,
