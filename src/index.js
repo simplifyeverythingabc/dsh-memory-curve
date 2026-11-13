@@ -25,7 +25,7 @@ import { homedir } from 'node:os';
  *
  * 必须静态 import。曾经试过顶层 await 做可选导入，结果 Loader 读到模块时
  * `Config` 还是 undefined（异步赋值没跑完），Host 就不投影 namespace，
- * 设置界面永远显示 status=unavailable / revision=undefined。
+ * 配置编辑器永远显示 status=unavailable / revision=undefined。
  *
  * 代价：仓库目录 / CI 里没有这个包时模块加载会失败 —— CI 里造个 stub 顶上。
  */
@@ -39,8 +39,8 @@ export const name = 'memory-curve';
 export const inject = ['systemPrompt', 'tools'];
 
 /**
- * 插件配置。DSH 的设置界面渲染的就是这个 schema —— 每个字段都要
- * `.volatile()`，否则 `volatileForm()` 返回 undefined，整个表单不会出现。
+ * 插件配置。DSH 的配置系统读的就是这个 schema，`cordis.patch.yml` 里写的
+ * `config` 会按它校验和补默认值。
  *
  * 值和 web-search 等现有插件一致：静态 import schemastery（它是 profile 的
  * 依赖，能正常解析）+ z.object(...)。
@@ -94,7 +94,7 @@ function normalizeDir(input) {
   try { return resolve(s); } catch { return s; }
 }
 
-/** 设置界面里填的记忆目录（已规范化）。空串表示没配。 */
+/** Config 里配的记忆目录（已规范化）。空串表示没配。 */
 function configuredMemDir() {
   return normalizeDir(readField(liveConfig?.memoryDir, ''));
 }
@@ -124,7 +124,7 @@ const ensureConfiguredDir = () => {
 };
 
 /** 记忆流水目录。按优先级回退：
- *    1. 设置界面里填的 memoryDir（用户显式配置，优先级最高）
+ *    1. Config 里的 memoryDir（cordis.patch.yml 配的，优先级最高）
  *    2. DSH_MEMORY_DIR        —— 环境变量
  *    3. MEMORY_GALAXY_DIR     —— 早期从 dsh-memory-galaxy 借用的，保留兼容
  *    4. D:\memory             —— Windows 老用户的历史位置，存在就用
@@ -222,8 +222,8 @@ function dayIndex(graded, days) {
 export function apply(ctx, config = {}) {
   if (config.disabled === true) return;
 
-  // ── 记忆目录：设置界面里填的那个 ──────────────────────────────
-  // Config 声明了 memoryDir，DSH 的设置界面据此渲染表单。
+  // ── 记忆目录：cordis.patch.yml 里 config.memoryDir 那个 ──────────
+  // Config 声明了 memoryDir，cordis.patch.yml 里的同名字段按它校验。
   // 字段标了 .volatile()，Loader 交给插件的是 live 引用（{ get() }），
   // Settings 提交时就地更新 —— 所以这里存下 config，别缓存成字符串。
   liveConfig = config;
@@ -598,6 +598,6 @@ export function apply(ctx, config = {}) {
 //   registry.plugin() 拿到的 plugin.Config === undefined
 //   → fiber.runtime.Config === undefined
 //   → dsh-settings 的 describe() 判定 schema === undefined 并跳过
-//   → 设置界面永远 status=unavailable、revision=undefined，保存被拒
+//   → 配置编辑器永远 status=unavailable、revision=undefined
 //
 // 只用命名导出（name / inject / Config / apply）就能让 Loader 拿到完整对象。

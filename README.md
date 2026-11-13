@@ -106,17 +106,36 @@ pnpm add file:./path/to/dsh-memory-curve
 
 ---
 
-## 设置面板（只读）
+## 配置记忆目录
 
-装上重启后，设置页会出现「记忆曲线」一页，显示**当前生效的记忆目录**。
+插件读三个来源，按优先级：
 
-**它能看，不能改** —— 这不是偷懒，是宿主限制：DSH 的 `configForms` 服务对本插件返回的 `form` 对象是空壳（只有 `unsubscribe`，没有 `mutate` / `getSnapshot`），拿不到写入通道。
+| 顺序 | 来源 | 说明 |
+|---|---|---|
+| 1 | `DSH_MEMORY_DIR` | 环境变量。**采集脚本也认这个，唯一两边都通的** |
+| 2 | `MEMORY_GALAXY_DIR` | 兼容旧名 |
+| 3 | `D:\memory` | Windows 老位置，**存在才用** |
+| 4 | `<DSH_HOME>/memory` | 跨平台默认 |
 
-**改路径用下面两条路，都可靠：**
+### 推荐：设环境变量
 
-### 一、改 profile 的 cordis.patch.yml
+```powershell
+# Windows
+setx DSH_MEMORY_DIR "D:\memory"
+```
 
-在文件末尾加一个覆盖条目（**不要写 `- insert:` 形式**，那会让插件加载两次、id 重复，配置编辑器会直接把它过滤掉）：
+```bash
+# Linux / macOS
+export DSH_MEMORY_DIR="$HOME/memory"
+```
+
+**设完要重开命令行和 DSH**（`setx` 只影响新进程）。
+
+这条路的优点：**插件和 `tools/memory-notes.mjs` 读的是同一个值**，不会出现「插件读 A 目录、脚本写 B 目录」的脱节。
+
+### 或者在 profile 里覆盖
+
+编 `~/.dsh/profiles/desktop/cordis.patch.yml`，末尾加：
 
 ```yaml
 - id: memory-curve
@@ -125,15 +144,17 @@ pnpm add file:./path/to/dsh-memory-curve
     memoryDir: D:\memory
 ```
 
-### 二、环境变量
+**注意不要写 `- insert:`** —— 那会让插件加载两次、id 重复，配置编辑器会直接过滤掉它。要覆盖已有条目就用上面这种不带 `insert` 的形式。
 
-```powershell
-setx DSH_MEMORY_DIR "D:\memory"
-```
+**但这条路只影响插件读，不影响采集脚本写。** 两者会脱节，除非同时设 `DSH_MEMORY_DIR`。所以推荐第一种。
 
-重启 DSH 生效。适合 CI、脚本、不想碰 yaml 的场景。
+### 为什么没有设置界面
 
-**优先级**：面板读的是同一个值，所以无论用哪条路，页面显示都会跟着变。
+试过，做不出来。
+
+DSH 的 `configForms` 服务对本插件返回的 `form` 对象是空壳 —— 只有 `unsubscribe`，没有 `mutate` / `getSnapshot`，拿不到写入通道。同目录的 `web-search` 能改是因为它的 client bundle 走了内部路径，外部插件复现不了。
+
+**放弃面板后反而更清爽**：少一个 client bundle，少一层出错的可能，环境变量本来就更适合这种「一次配好不再动」的东西。
 ## 装完是空的，得先喂数据
 
 **插件只负责「读」，不负责「采集」。** 装上之后索引是空白的，六个工具都返回"没有记忆"，这是正常的。
