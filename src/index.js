@@ -60,6 +60,12 @@ export const Config = z.object({
 
 const dshHome = () => process.env.DSH_HOME || join(homedir(), '.dsh');
 
+/**
+ * context 的插值开关。必须是 false —— 见注册处的注释。
+ * 提成常量是为了让启动日志能回读真实值，而不是打印一句拍脑袋的"已设置"。
+ */
+const CONTEXT_INTERPOLATE = false;
+
 /** apply() 时存下来的 config，供模块级函数读取。 */
 let liveConfig = null;
 
@@ -240,18 +246,10 @@ export function apply(ctx, config = {}) {
   //
   // 流水里随时会有含 `{{` 的正文（讨论变量通道、贴报错都会），一旦 interpolate
   // 被误删或上游语义变化，整个回合会抛 unknown prompt variable 直接失败。
-  // 这里在装载时构造一段含 `{{__probe__}}` 的假 context 走一遍插值判定，
-  // 不通过就打印告警（不阻断装载，否则插件一并挂掉更难查）。
-  try {
-    // 不调 read()：它在后面才定义，会进暂时性死区被 catch 吞掉。
-    const probe = '正文片段 {{__probe__}} 结尾';
-    const hasVarSyntax = probe.includes('{{') && probe.includes('}}');
-    console.log(
-      hasVarSyntax
-        ? '[memory-curve] 自检通过：正文含变量语法，context 已设 interpolate:false，不会被解析'
-        : '[memory-curve] 自检：探针异常',
-    );
-  } catch { /* 自检失败不影响主流程 */ }
+  //
+  // 以前这里拿一段本地拼的字符串做 includes 判断 —— 那是恒真的伪自检，
+  // 什么也没验证。真正的断言在注册处：context 的 interpolate 选项和实际
+  // 传进去的值必须是 false。这里只在注册后回读一次并打印真实取值。
 
   // 启动时补一次每日摘要（失败不影响注入）
   try {
@@ -308,6 +306,11 @@ export function apply(ctx, config = {}) {
       console.warn('[memory-curve] 没有 systemPrompt.context，索引这一轮不注入');
       return () => {};
     }
+    // 先打日志再 return —— 之前写在 return 后面，是永远执行不到的死代码
+    console.log(
+      `[memory-curve] context 注册: interpolate=${CONTEXT_INTERPOLATE}`
+      + (CONTEXT_INTERPOLATE === false ? '（正文含 {{ 不会被解析）' : ' ← 危险，应为 false'),
+    );
     return prompt.context({
       name: 'memory-curve-index',
       order: 900,
@@ -316,7 +319,7 @@ export function apply(ctx, config = {}) {
       // 而记忆正文里只要出现 `{{...}}`（讨论变量通道、写配置、贴报错都会出现），
       // 就会被当变量名解析，找不到就抛 unknown prompt variable —— 整个原子崩掉。
       // 实测踩过：agent 侧报 "unknown prompt variable \"{{memory_curve}}\" in context \"memory-curve-index\""。
-      interpolate: false,
+      interpolate: CONTEXT_INTERPOLATE,
     });
   }, 'memory-curve.context');
 
@@ -447,7 +450,7 @@ export function apply(ctx, config = {}) {
         type: 'object', additionalProperties: false,
         properties: {
           id: { type: 'string', description: '单个 memory_id，形如 m_20261109_000087' },
-          ids: { type: 'array', items: { type: 'string' }, description: '元素可为单条 m_xxx、范围 m_a..m_b、或事件键 event:e_yyyyMMdd_HHmm（摘要里标 +N 不连续时只能用这个）' },
+          ids: { type: 'array', items: { type: 'string' }, description: '元素可为单条 m_xxx、事件键 event:e_yyyyMMdd_HHmm、或范围 m_a..m_b。注意：哈希 id 不能算术展开，范围只取首尾两条；要全量请用事件键' },
           day: { type: 'string', description: '日期，如 2026-11-09' },
           pattern: { type: 'string', description: '关键词或正则；留空返回当天开头若干条' },
           maxChars: { type: 'integer', description: '最多返回多少字符，默认 4000' },

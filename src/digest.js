@@ -244,7 +244,18 @@ export function listDays(arg) {
   return [...set].sort();
 }
 
-/** 某天完整流水里按关键词过滤条目（用于「按摘要反查原文」） */
+/**
+ * 某天完整流水里按关键词过滤条目（用于「按摘要反查原文」）。
+ *
+ * HEAD 必须容忍尾部锚点。流水现在每一行都写成
+ *   2026-11-12 16:08 ［用户］ <!-- m_20261112_4f4be4 -->
+ * 早先这个正则结尾是 `\s*$`，带锚点的行一条都匹配不上 —— total 恒为 0，
+ * 而全库 1798 条又全都带锚点，等于这个通道整个是死的。
+ *
+ * pattern 走 makeMatcher：默认字面量，只有 /.../ 才当正则。
+ * 以前这里是裸 new RegExp，同一个词在 memory_search 和 day+pattern 两条路
+ * 语义不同（v2.8 在一边只匹配字面，在另一边 . 通配 v2x8 也算命中）。
+ */
 export function grepDay(arg) {
   if (typeof arg === 'string') {
     throw new TypeError('grepDay 的参数改成了对象形式：grepDay({ memDir, day, pattern, maxChars })');
@@ -253,14 +264,22 @@ export function grepDay(arg) {
   const p = join(memDir, `${day}.md`);
   if (!existsSync(p)) return null;
   const raw = readFileSync(p, 'utf8');
-  const HEAD = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+［(.+?)］\s*$/;
+  const HEAD = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+［(.+?)］(?:\s*<!--\s*(m_[0-9]{8}_[0-9a-f]{6})\s*-->)?\s*$/;
   const blocks = [];
   let cur = null;
+  let seq = 0;
   for (const line of raw.split(/\r?\n/)) {
     const m = HEAD.exec(line);
     if (m) {
       if (cur) blocks.push(cur);
-      cur = { head: line, body: [] };
+      // 与 readById / events.js readEntries 一致：兜底编号只给缺锚点的递增
+      const anchored = m[4];
+      if (!anchored) seq += 1;
+      cur = {
+        head: line,
+        body: [],
+        id: anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`,
+      };
     } else if (cur) {
       cur.body.push(line);
     }
@@ -269,9 +288,8 @@ export function grepDay(arg) {
 
   let hits = blocks;
   if (pattern) {
-    let re;
-    try { re = new RegExp(pattern, 'i'); } catch { re = null; }
-    hits = blocks.filter((b) => (re ? re.test(b.head) || re.test(b.body.join('\n')) : b.body.join('\n').includes(pattern)));
+    const matcher = makeMatcher(pattern);
+    hits = blocks.filter((b) => matcher.re.test(b.head) || matcher.re.test(b.body.join('\n')));
   }
   const out = [];
   let used = 0;
