@@ -29,7 +29,7 @@ import { join } from 'node:path';
  * 代价：仓库目录 / CI 里没有这个包时模块加载会失败 —— CI 里造个 stub 顶上。
  */
 import z from '@deepseek-ai/schemastery';
-import { readEntries, clusterEvents, gradeEvents, renderForPrompt, currentThreads, LEVEL_NAME } from './events.js';
+import { readEntries, clusterEvents, gradeEvents, renderForPrompt, currentThreads as clusterThreads, LEVEL_NAME } from './events.js';
 import { resolveMemDir, dshHome, normalizeDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL } from './access.js';
@@ -270,7 +270,7 @@ function build(now = Date.now()) {
     g.ids = src?.ids || [];
     g.state = stateOf({ accessCount: g.accessCount, lastAccess: g.lastAccess, R: g.R }, now);
   }
-  return { entries, events, graded };
+  return { entries, events, graded, threads: clusterThreads() };
 }
 
 export function report(graded) {
@@ -406,11 +406,11 @@ export function apply(ctx, config = {}) {
     const nowMs = Date.now();
     if (readCache.text && nowMs - readCache.at < READ_TTL) return readCache.text;
     try {
-      const { entries, events, graded } = build();
+      const { entries, events, graded, threads } = build();
       const body = renderForPrompt(graded, {
         maxL1, maxL2, maxL3,
         maxThreads: num(config.maxThreads, MAX_THREADS),
-        threads: currentThreads(),
+        threads,
         now: Date.now(),
       });
       const c = {};
