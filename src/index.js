@@ -270,7 +270,10 @@ function build(now = Date.now()) {
 function report(graded) {
   const L = ['# 事件分级（遗忘曲线）', '',
     `> 生成 ${fmtYMD(Date.now())}　事件 ${graded.length} 个`, '',
-    '> `S = ln(1+条数)×(1+0.35·ln(1+跨度天数))×(1+密度/60)`　`R = exp(−距今小时÷(S×24))`', '',
+    '> `S = ln(1+条数)×(1+0.35·ln(1+跨度天数))×(1+密度/60)×提取×间隔×显著`', '',
+    '> `R = (1 + 6.39·距今小时÷(S×24))^-0.5`　（幂律，长尾比指数更厚）', '',
+    '> 距今从「最近一次活动」与「最近一次被提取」里取更晚的那个 —— 提取即再巩固', '',
+    '> 等级按绝对阈值 + 相对配额两道闸：L1≤10%、L2≤22%、L3≤25%，超出降级（标 ↓）', '',
     '| 等级 | 事件数 |', '|---|---|'];
   const c = {};
   for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
@@ -279,12 +282,19 @@ function report(graded) {
     const list = graded.filter((g) => g.level === lv);
     if (!list.length) continue;
     L.push('', `## ${LEVEL_NAME[lv]}（${list.length}）`, '',
-      '| # | 开始 | 条数 | 跨度 | 密度 | S | R | 查过 | 状态 | 首句 |', '|---|---|---|---|---|---|---|---|---|---|');
+      '| # | 开始 | 条数 | 跨度 | S | R | 修正 | 查过 | 等级 | 状态 | 首句 |', '|---|---|---|---|---|---|---|---|---|---|---|');
     for (const g of list) {
       const t = fmtMD(g.startAt);
       const head = (g.head || '').replace(/[|`*#]/g, '').slice(0, 60);
       const st = STATE_LABEL[g.state] || g.state || '-';
-      L.push(`| ${g.idx} | ${t} | ${g.count} | ${g.spanDays}天 | ${g.density} | ${g.S} | ${g.R} | ${g.accessCount || 0}次 | ${st} | ${head} |`);
+      // 修正列只显示真正起作用的乘数：全 1 就写「—」，避免三列 1.00 占满视线
+      const mods = [];
+      if ((g.spacing || 1) > 1) mods.push(`间${g.spacing}`);
+      if ((g.salience || 1) > 1) mods.push(`显${g.salience}`);
+      if ((g.retrieval || 1) > 1) mods.push(`取${g.retrieval}`);
+      const mod = mods.length ? mods.join(' ') : '—';
+      const lvMark = g.demoted ? `${g.level}↓` : g.level;
+      L.push(`| ${g.idx} | ${t} | ${g.count} | ${g.spanDays}天 | ${g.S} | ${g.R} | ${mod} | ${g.accessCount || 0}次 | ${lvMark} | ${st} | ${head} |`);
     }
   }
   return L.join('\n') + '\n';

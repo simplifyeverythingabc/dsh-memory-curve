@@ -362,6 +362,138 @@ try {
     fail('分级上限生效', e.message.slice(0, 80));
   }
 
+  // ── 0.4.0 记忆动力学：遗忘曲线 / 再巩固 / 间隔效应 / 显著性 / 相对配额
+  //
+  // 这几条是「模型层」的断言，不依赖宿主。每条都在验一个具体的心理学机制，
+  // 而不是「代码跑起来了」——否则公式写反了也能绿灯。
+  const DAY = 86400000;
+  const NOW = Date.UTC(2026, 5, 1, 12, 0, 0);   // 固定基准，避免跨午夜翻车的假红
+
+  try {
+    const ev = await import('../src/events.js');
+
+    // (1) 幂律曲线在 x=1 处与指数曲线对齐 —— S 的「天数」语义跨版本可比
+    const r1 = Math.pow(1 + ev.POWER_K, -ev.POWER_BETA);
+    const e1 = Math.exp(-1);
+    if (Math.abs(r1 - e1) > 0.01) {
+      fail('幂律/指数对齐点', `x=1 期望 ${e1.toFixed(3)}，实得 ${r1.toFixed(3)}`);
+    } else {
+      ok('幂律/指数对齐点', `x=1 两边都是 ${r1.toFixed(3)}`);
+    }
+
+    // (2) 长尾必须更厚 —— 这是换幂律的唯一理由
+    const r10 = Math.pow(1 + ev.POWER_K * 10, -ev.POWER_BETA);
+    if (r10 <= 0.1) {
+      fail('长尾更厚', `x=10 得 ${r10.toFixed(4)}，不够平（应 >0.1）`);
+    } else {
+      ok('长尾更厚', `x=10 幂律 ${r10.toFixed(3)} vs 指数 ${Math.exp(-10).toExponential(1)}`);
+    }
+
+    // (3) 间隔效应：分散提取 > 集中重复
+    const iso = (ms) => new Date(ms).toISOString();
+    const spaced = ev.spacingOf([-5, -4, -3, -2, -1].map((d) => iso(NOW + d * DAY)), NOW);
+    const massed = ev.spacingOf([0, 0, 0, 0, 0].map(() => iso(NOW - 60000)), NOW);
+    if (!(spaced > 1.1)) {
+      fail('间隔效应', `分散提取只得到 ${spaced}，应 >1.1`);
+    } else if (massed !== 1) {
+      fail('间隔效应', `集中重复不该加分，实得 ${massed}`);
+    } else {
+      ok('间隔效应', `分散 ${spaced} / 集中 ${massed}`);
+    }
+
+    // (4) 同一分钟的多次提取合并成一次 —— 否则「一次查 30 条」会被算成极度密集
+    const accFile = join(root, 'access-selftest.json');
+    const t1 = iso(NOW - 2 * DAY);
+    const t2 = iso(NOW - 1 * DAY);
+    writeFileSync(accFile, JSON.stringify({
+      same: { n: 3, last: t1, first: t1, ts: [t1, t1, t1] },
+      spread: { n: 2, last: t2, first: t1, ts: [t1, t2] },
+    }), 'utf8');
+    const acc = await import('../src/access.js');
+    const A = acc.sumAccess(accFile, ['same']);
+    const B = acc.sumAccess(accFile, ['spread']);
+    if (A.ts.length !== 1) {
+      fail('同分钟提取合并', `3 个同分钟时间戳应合成 1 次，实得 ${A.ts.length}`);
+    } else if (B.ts.length !== 2) {
+      fail('同分钟提取合并', `跨天两次应保留 2 次，实得 ${B.ts.length}`);
+    } else {
+      ok('同分钟提取合并', `同分钟 ${A.ts.length} 次 / 跨天 ${B.ts.length} 次`);
+    }
+
+    // (5) 再巩固：最近被提取过的记忆，衰减起点更晚 -> R 更高
+    const mkEv = (id, at, texts, spanMs = 0) => ({
+      day: iso(at).slice(0, 10), startAt: at, lastAt: at + spanMs,
+      items: texts.map(() => ({})), texts,
+      toks: new Set(texts.join(' ').split(/\s+/).filter((s) => s.length >= 2)),
+      ids: [id], salience: 1,
+    });
+    const old = NOW - 12 * DAY;
+    const fresh = mkEv('reb1', old, ['排查连接池超时'], 3600000);
+    const gNone = ev.gradeEvents([mkEv('reb1', old, ['排查连接池超时'], 3600000)], NOW,
+      () => ({ n: 0, last: null, ts: [] }));
+    const gHit = ev.gradeEvents([mkEv('reb1', old, ['排查连接池超时'], 3600000)], NOW,
+      () => ({ n: 3, last: iso(NOW - 60000), ts: [] }));
+    if (!(gHit[0].R > gNone[0].R + 0.1)) {
+      fail('提取再巩固', `被查过 R=${gHit[0].R}，没查过 R=${gNone[0].R}，差距不够`);
+    } else if (gHit[0].ageH >= gNone[0].ageH) {
+      fail('提取再巩固', `衰减起点没重算：ageH ${gHit[0].ageH} vs ${gNone[0].ageH}`);
+    } else {
+      ok('提取再巩固', `R ${gNone[0].R} -> ${gHit[0].R}，ageH ${gNone[0].ageH} -> ${gHit[0].ageH}`);
+    }
+
+    // (6) 显著性只奖给「最有事发生的那批」，且封顶 1.35
+    const calmA = { texts: ['今天天气不错，看了会儿书'], items: [{}] };
+    const calmB = { texts: ['整理了一下文件目录'], items: [{}] };
+    const calmC = { texts: ['把配置读了一遍'], items: [{}] };
+    const rough = { texts: ['不对，这里必须重来', '又报错了，失败了三次', '这次修好了'], items: [{}, {}, {}] };
+    ev.salienceAll([calmA, calmB, calmC, rough]);
+    if (!(rough.salience > calmA.salience)) {
+      fail('情绪显著性', `有事发生的 ${rough.salience} 不高于平淡的 ${calmA.salience}`);
+    } else if (rough.salience > 1.35) {
+      fail('情绪显著性', `封顶失效：${rough.salience} > 1.35`);
+    } else if (calmA.salience !== 1) {
+      fail('情绪显著性', `中位数以下应保持 1，实得 ${calmA.salience}`);
+    } else {
+      ok('情绪显著性', `平淡 ${calmA.salience} / 有冲突 ${rough.salience}`);
+    }
+
+    // (7) 相对配额：一堆同样够格的事件，L1 不能超过总量的 10%
+    //     这一条直接守住「注入量不随对话变长而膨胀」——以前 L1 数量随历史线性涨。
+    //     构造上让 lastAt 紧贴基准时刻（R 接近 1），起止跨 12 天（S 够 6），
+    //     确保它们**全都**过得了绝对闸，这样测的才是配额而不是阈值。
+    const big = Array.from({ length: 50 }, (_, i) => {
+      const lastAt = NOW - i * 60000;
+      return {
+        day: iso(lastAt).slice(0, 10),
+        startAt: lastAt - 12 * DAY,
+        lastAt,
+        items: new Array(30).fill({}),
+        texts: ['批量事件' + i],
+        toks: new Set(['aa' + i, 'bbbb', 'cccc']),
+        ids: ['big' + i],
+        salience: 1,
+      };
+    });
+    const gBig = ev.gradeEvents(big, NOW);
+    const l1n = gBig.filter((x) => x.level === 'L1').length;
+    const eligible = gBig.filter((x) => x.R >= 0.568 && x.S >= 6).length;
+    const cap = Math.max(3, Math.round(50 * 0.10));
+    const dm = gBig.filter((x) => x.demoted).length;
+    if (eligible < 40) {
+      fail('相对配额', `夹具没构造好：只有 ${eligible} 个过绝对闸`);
+    } else if (l1n > cap) {
+      fail('相对配额', `L1 有 ${l1n} 个，超过配额 ${cap}`);
+    } else if (l1n === 0) {
+      fail('相对配额', '一个 L1 都没有，绝对闸没放进来');
+    } else if (dm === 0) {
+      fail('相对配额', '没有事件被降级，配额没生效');
+    } else {
+      ok('相对配额', `${eligible} 个够格 -> L1 ${l1n}（上限 ${cap}），降级 ${dm}`);
+    }
+  } catch (e) {
+    fail('记忆动力学', e.message.slice(0, 90));
+  }
+
   // ── 工具有没有真的干活
   const toText = (name, raw) => {
     const tool = tools[name];
