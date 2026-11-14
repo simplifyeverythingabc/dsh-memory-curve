@@ -620,6 +620,31 @@ try {
     fail('蔡加尼克/相对时间', e.message.slice(0, 90));
   }
 
+  // ── 报告文案必须跟上公式
+  //
+  // 报告头里的公式是给人看的「这个数是怎么算出来的」。公式改了文案没跟上，比没有
+  // 报告更糟 —— 读的人会按错的公式去理解分级。
+  // 这里直接跑一遍 report()，把关键项钉死。
+  try {
+    const idx = await import('../src/index.js');
+    const txt = idx.report([
+      { idx: 0, level: 'L1', startAt: NOW, count: 3, spanDays: 1, S: 8, R: 0.9,
+        accessCount: 0, state: 'active', head: '测试事件' },
+    ]);
+    const must = [
+      ['幂律公式', /\(1 \+ 6\.39/],
+      ['幂律指数', /\^-0\.5/],
+      ['再巩固说明', /最近一次被提取/],
+      ['相对配额说明', /L1≤10%/],
+    ];
+    const miss = must.filter(([, re]) => !re.test(txt)).map(([k]) => k);
+    if (miss.length) fail('报告公式文案', `缺：${miss.join('、')}`);
+    else if (/exp\(−距今/.test(txt)) fail('报告公式文案', '还残留指数公式');
+    else ok('报告公式文案', '幂律 / 再巩固 / 相对配额三项都在，无旧指数残留');
+  } catch (e) {
+    fail('报告公式文案', e.message.slice(0, 90));
+  }
+
   // ── 工具有没有真的干活
   const toText = (name, raw) => {
     const tool = tools[name];

@@ -267,7 +267,7 @@ function build(now = Date.now()) {
   return { entries, events, graded };
 }
 
-function report(graded) {
+export function report(graded) {
   const L = ['# 事件分级（遗忘曲线）', '',
     `> 生成 ${fmtYMD(Date.now())}　事件 ${graded.length} 个`, '',
     '> `S = ln(1+条数)×(1+0.35·ln(1+跨度天数))×(1+密度/60)×提取×间隔×显著`', '',
@@ -301,7 +301,7 @@ function report(graded) {
 }
 
 /** 日期索引：最近 N 天，每天一行 */
-function dayIndex(graded) {
+export function dayIndex(graded) {
   const byDay = new Map();
   for (const g of graded) {
     const d = dayOf(g.startAt);
