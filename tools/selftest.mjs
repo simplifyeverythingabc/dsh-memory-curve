@@ -24,7 +24,7 @@
  *   node tools/selftest.mjs
  *   MC_SELFTEST_ROOT=/path/to/writable node tools/selftest.mjs
  */
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { normalizeDir } from '../src/paths.js';
@@ -492,6 +492,83 @@ try {
     }
   } catch (e) {
     fail('记忆动力学', e.message.slice(0, 90));
+  }
+
+  // ── 0.4.1 增量缓存：结果必须与全量逐字段一致
+  //
+  // 增量聚类是「只重算最后一段、复用前缀」的优化，风险在于复用边界算错 ——
+  // 那种 bug 不会崩，只会让分级悄悄偏移，最难发现。所以这里逐场景对比
+  // 「增量结果」与「清空缓存后的全量结果」，比到每个字段。
+  try {
+    const evm = await import('../src/events.js');
+    const incDir = join(root, 'inc-memory');
+    mkdirSync(incDir, { recursive: true });
+
+    const dayText = (day, n, baseH = 10) => {
+      const lines = [];
+      for (let i = 0; i < n; i++) {
+        const hh = String(baseH + Math.floor(i / 60)).padStart(2, '0');
+        const mi = String(i % 60).padStart(2, '0');
+        lines.push(`${day} ${hh}:${mi} ［用户］ <!-- m_${day.replace(/-/g, '')}_${String(i + 1).padStart(6, '0')} -->`);
+        lines.push(`第 ${i} 条：排查连接池超时，改 maxWait 参数`);
+        lines.push('');
+      }
+      return lines.join('\n');
+    };
+    const shape = (evs) => evs.map((e) => ({
+      s: e.startIdx, e: e.endIdx, n: e.items.length,
+      a: e.startAt, b: e.lastAt, ids: e.ids.slice(),
+      t: e.toks.size, sig: e.sigDensity, sal: e.salience,
+    }));
+    const fullShape = (entries) => { evm.clearClusterCache(); return shape(evm.clusterEvents(entries)); };
+
+    const scenarios = [];
+    // 每个场景：先在「当前状态」上预热缓存，再施加变化，然后对比增量与全量。
+    // mutate 只能调一次 —— 删除类操作调两次会 ENOENT。
+    const step = (label, mutate) => {
+      evm.clusterEvents(evm.readEntries(incDir));       // 预热：让缓存反映变化前的状态
+      mutate();
+      const inc = shape(evm.clusterEvents(evm.readEntries(incDir)));
+      const full = fullShape(evm.readEntries(incDir));  // 清掉聚类缓存重算一遍
+      scenarios.push({ label, same: JSON.stringify(inc) === JSON.stringify(full), n: inc.length });
+    };
+
+    for (let d = 1; d <= 3; d++) {
+      const day = `2026-03-0${d}`;
+      writeFileSync(join(incDir, `${day}.md`), dayText(day, 20), 'utf8');
+    }
+    evm.clearEntryCache(); evm.clearClusterCache();
+
+    step('尾文件追加', () => appendFileSync(join(incDir, '2026-03-03.md'),
+      '2026-03-03 11:30 ［助手］ <!-- m_20260303_000099 -->\n新加一条\n', 'utf8'));
+    step('中间文件重写', () => writeFileSync(join(incDir, '2026-03-02.md'), dayText('2026-03-02', 25, 9), 'utf8'));
+    step('新增一天', () => writeFileSync(join(incDir, '2026-03-04.md'), dayText('2026-03-04', 15), 'utf8'));
+    step('删除一天', () => rmSync(join(incDir, '2026-03-02.md')));
+
+    const broken = scenarios.filter((s) => !s.same);
+    if (broken.length) {
+      fail('增量聚类一致性', `${broken.map((s) => s.label).join('、')} 与全量不符`);
+    } else {
+      ok('增量聚类一致性', `${scenarios.length} 个场景全部与全量逐字段一致`);
+    }
+
+    // 无变化时必须直接返回同一个数组（省掉整轮重算），这是「稳态不随对话变慢」的前提
+    const e2 = evm.readEntries(incDir);
+    const x1 = evm.clusterEvents(e2);
+    const x2 = evm.clusterEvents(evm.readEntries(incDir));
+    if (x1 !== x2) fail('无变化复用', '聚类结果没有复用，说明缓存失效判定有误');
+    else ok('无变化复用', '同一份数据返回同一数组，零重算');
+
+    // 文件改了必须重读（缓存不能把新内容吞掉）
+    appendFileSync(join(incDir, '2026-03-04.md'), '\n2026-03-04 23:59 ［用户］ <!-- m_20260304_000777 -->\n末尾追加\n', 'utf8');
+    const e3 = evm.readEntries(incDir);
+    if (!e3.some((x) => x.id === 'm_20260304_000777')) {
+      fail('解析缓存失效', '追加的条目没被读到，文件缓存没失效');
+    } else {
+      ok('解析缓存失效', '文件改动后重新解析，新条目可见');
+    }
+  } catch (e) {
+    fail('增量缓存', e.message.slice(0, 90));
   }
 
   // ── 工具有没有真的干活

@@ -15,7 +15,7 @@
  *
  * 注入只给 L1+L2（+部分 L3）的梗概，完整内容永远留在记忆目录里。
  */
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const GAP_MIN = 18;        // 相邻条目间隔超过这么多分钟就断事件
@@ -129,7 +129,13 @@ export function signalDensity(ev) {
  */
 export function salienceAll(events) {
   if (!events.length) return;
-  const raw = events.map((ev) => signalDensity(ev));
+  // 原始密度按事件缓存（sigDensity）：增量聚类时只有被延长的那一个需要重算，
+  // 其余直接复用。分位归一本身必须每次全量做（总数变了分位就变），但那只依赖
+  // 已算好的标量，是一遍 O(n) 取分位，不再扫文本。
+  const raw = events.map((ev) => {
+    if (ev.sigDensity === undefined) ev.sigDensity = signalDensity(ev);
+    return ev.sigDensity;
+  });
   const sorted = raw.slice().sort((a, b) => a - b);
   const at = (q) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))] ?? 0;
   const p50 = at(0.5);
@@ -240,56 +246,155 @@ function lastLine(texts) {
 // 行尾可带 <!-- m_YYYYMMDD_NNNNNN --> 锚点；旧文件没有锚点，用位置兜底编号
 const DAY_RE = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2})\s+［(.+?)］(?:\s*<!--\s*(m_[0-9]{8}_[0-9a-f]{6})\s*-->)?\s*$/;
 
+/**
+ * 单日文件解析缓存（0.4.1）
+ *
+ * 为什么要它：`readEntries` 以前每次调用都全量读并解析**所有**天的 md —— 这是
+ * 「对话越长越慢」的根因。实测 2.16 MB / 21 天 20 ms、6.48 MB / 63 天 54 ms、
+ * 10.8 MB / 105 ms，完全线性。而实际每次变化的通常只有**今天这一个文件**
+ * （采集器追加写入），其余 99% 的开销都是白读。
+ *
+ * 缓存键用绝对路径（同一进程可能切不同记忆目录），失效条件是 size + mtimeMs。
+ * mtimeMs 是浮点毫秒，够区分同一秒内的两次写入；再加 size 双保险。
+ *
+ * 内存：缓存持有已解析的条目对象。3000 条约 6 MB，10 万条约 200 MB —— 所以设
+ * `FILE_CACHE_MAX` 上限，超出按最久未用淘汰（LRU）。正常使用（一天一个文件）
+ * 十年也到不了 3650 个，上限只防异常目录。
+ */
+const FILE_CACHE_MAX = 1024;
+const fileCache = new Map();   // absPath -> { size, mtimeMs, day, entries }
+
+function parseDayFile(raw, day) {
+  const entries = [];
+  let cur = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^<!-- dsh-note:auto-(?:begin|end):7f3a -->$/.test(line)) {
+      if (cur) { entries.push(cur); cur = null; }
+      continue;
+    }
+    const mm = DAY_RE.exec(line);
+    if (mm) {
+      if (cur) entries.push(cur);
+      const [, d, hh, mi, who, anchored] = mm;
+      cur = {
+        day: d, hhmm: `${hh}:${mi}`, who,
+        at: new Date(`${d}T${hh}:${mi}:00`).getTime(),
+        id: anchored || null,
+        buf: [],
+      };
+    } else if (cur) {
+      if (/^<!-- memory-source:[0-9a-f]{64} -->$/.test(line)) continue;
+      cur.buf.push(line);
+    }
+  }
+  if (cur) entries.push(cur);
+
+  // 兜底 id 按天内的出现顺序编号，天与天之间互不干扰 ——
+  // 所以一个文件可以脱离其它文件独立算 id（同一天的所有条目必在同一文件里）。
+  let seq = 0;
+  for (const e of entries) {
+    e.text = e.buf.join('\n').trim();
+    delete e.buf;                       // 缓存里不再保留原始行数组，省一半内存
+    if (!e.id) {
+      seq += 1;
+      e.id = `m_${e.day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`;
+    }
+  }
+  return entries;
+}
+
 export function readEntries(memDir) {
   const out = [];
   if (!existsSync(memDir)) return out;
+  const live = new Set();
+
   for (const fn of readdirSync(memDir)) {
     const m = /^(\d{4}-\d{2}-\d{2})\.md$/.exec(fn);
     if (!m) continue;
-    const day = m[1];
+    const full = join(memDir, fn);
+    live.add(full);
+    let st;
+    try { st = statSync(full); } catch { continue; }
+
+    const hit = fileCache.get(full);
+    if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) {
+      // LRU：命中即刷新顺序（Map 保序，删了再插就排到最后）
+      fileCache.delete(full);
+      fileCache.set(full, hit);
+      for (const e of hit.entries) out.push(e);
+      continue;
+    }
+
     let raw;
-    try { raw = readFileSync(join(memDir, fn), 'utf8'); } catch { continue; }
-    let cur = null;
-    for (const line of raw.split(/\r?\n/)) {
-      if (/^<!-- dsh-note:auto-(?:begin|end):7f3a -->$/.test(line)) {
-        if (cur) { out.push(cur); cur = null; }
-        continue;
-      }
-      const mm = DAY_RE.exec(line);
-      if (mm) {
-        if (cur) out.push(cur);
-        const [, d, hh, mi, who, anchored] = mm;
-        cur = {
-          day: d, hhmm: `${hh}:${mi}`, who,
-          at: new Date(`${d}T${hh}:${mi}:00`).getTime(),
-          id: anchored || null,
-          buf: [],
-        };
-      } else if (cur) {
-        if (/^<!-- memory-source:[0-9a-f]{64} -->$/.test(line)) continue;
-        cur.buf.push(line);
-      }
-    }
-    if (cur) out.push(cur);
+    try { raw = readFileSync(full, 'utf8'); } catch { continue; }
+    const entries = parseDayFile(raw, m[1]);
+    fileCache.set(full, { size: st.size, mtimeMs: st.mtimeMs, day: m[1], entries });
+    for (const e of entries) out.push(e);
   }
-  const seqByDay = new Map();
-  for (const e of out) {
-    e.text = e.buf.join('\n').trim();
-    if (!e.id) {
-      const n = (seqByDay.get(e.day) || 0) + 1;
-      seqByDay.set(e.day, n);
-      e.id = `m_${e.day.replace(/-/g, '')}_${String(n).padStart(6, '0')}`;
-    }
+
+  // 已经不存在的文件（被删/被改名）从缓存里摘掉，否则目录切换后旧条目会一直占内存
+  for (const k of fileCache.keys()) {
+    if (!live.has(k)) fileCache.delete(k);
   }
+  // LRU 上限
+  while (fileCache.size > FILE_CACHE_MAX) {
+    const oldest = fileCache.keys().next().value;
+    fileCache.delete(oldest);
+  }
+
   out.sort((a, b) => a.at - b.at);
   return out;
 }
 
-/** 把条目聚成事件 */
+/** 清空解析缓存：测试和「换了记忆目录」时用 */
+export function clearEntryCache() {
+  fileCache.clear();
+}
+
+/**
+ * 聚类结果缓存（0.4.1 增量）
+ *
+ * 聚类的状态机是严格顺序的：条目 i 是否并入当前事件，只取决于「当前事件的累积
+ * 词集」和「与上一条的间隔」，不依赖后面的条目。所以只要**前面的条目没变**，
+ * 它们的聚类结果就一定不变 —— 唯一可能受影响的是「最后一个还没封口的事件」，
+ * 因为新条目可能延长它。
+ *
+ * 实测：2.16 MB / 151 事件全量聚类 51 ms，而每次工具调用真正变化的通常只有
+ * 今天那一个文件的尾部几条。增量后只处理「最后一天新增的部分」。
+ *
+ * 前缀用**对象引用**比较：readEntries 命中文件缓存时返回的是同一批条目对象，
+ * 引用相等 ⇒ 内容相等，比逐个字段比对快得多（且不会误判）。
+ */
+let clusterState = null;   // { entries, events }
+
+/** 把条目聚成事件（增量：复用未变化的前缀） */
 export function clusterEvents(entries) {
-  const events = [];
-  let cur = null;
-  for (const e of entries) {
+  let p = 0;
+  let reuse = 0;
+  let prevEvents = null;
+
+  if (clusterState && clusterState.entries) {
+    const prev = clusterState.entries;
+    const n = Math.min(prev.length, entries.length);
+    while (p < n && prev[p] === entries[p]) p++;
+    if (p === entries.length && p === prev.length) return clusterState.events;   // 完全没变
+    prevEvents = clusterState.events;
+    // 只有「完全落在公共前缀内」的事件能安全复用；
+    // 碰到第一个跨过前缀边界的事件就停 —— 它可能就是被延长或截断的那个。
+    for (let i = 0; i < prevEvents.length; i++) {
+      if (prevEvents[i].endIdx < p) reuse = i + 1;
+      else break;
+    }
+  }
+
+  const events = reuse > 0 ? prevEvents.slice(0, reuse) : [];
+  const from = reuse > 0 ? prevEvents[reuse - 1].endIdx + 1 : 0;
+  // cur 指向复用出来的最后一个事件：它还没封口，新条目仍可能并入它。
+  // 这正是全量算法的状态，所以「继续跑」得到的结果与全量逐条一致。
+  let cur = events.length ? events[events.length - 1] : null;
+
+  for (let i = from; i < entries.length; i++) {
+    const e = entries[i];
     const toks = tokens(e.text);
     toks.delete(''); // 保险
     for (const s of STOP) toks.delete(s);
@@ -307,11 +412,13 @@ export function clusterEvents(entries) {
       cur = {
         startAt: e.at, lastAt: e.at, day: e.day,
         items: [], toks: new Set(), texts: [], ids: [],
+        startIdx: i, endIdx: i,
       };
       events.push(cur);
     }
     cur.lastAt = e.at;
     cur.day = e.day;
+    cur.endIdx = i;
     cur.items.push(e);
     cur.texts.push(e.text);
     if (e.id) cur.ids.push(e.id);
@@ -320,11 +427,20 @@ export function clusterEvents(entries) {
       cur.toks.add(t);
     }
   }
-  // 情绪显著度只依赖事件文本，与 now 无关 —— 在这里算一次随事件缓存，
-  // 后续每次 gradeEvents 直接读，不重复扫文本。
-  // 归一必须在全体事件层面做（相对归一），所以放在循环之后批量算。
+
+  // 情绪显著度只依赖事件文本，与 now 无关。原始信号密度按事件缓存（sigDensity），
+  // 增量时只重算「被延长的那一个 + 新增的」，其余直接复用。
+  const dirty = Math.max(reuse - 1, 0);
+  for (let i = dirty; i < events.length; i++) events[i].sigDensity = signalDensity(events[i]);
   salienceAll(events);
+
+  clusterState = { entries, events };
   return events;
+}
+
+/** 清空聚类缓存（测试与切换目录时用） */
+export function clearClusterCache() {
+  clusterState = null;
 }
 
 /**
@@ -367,6 +483,53 @@ function docFreq(events) {
  */
 export const POWER_BETA = 0.5;
 export const POWER_K = 6.39;
+
+/** 纯数字 / 十六进制碎片，做主题词没有信息量（7811 / 0x1c / 113mb） */
+const JUNK_TOK = /^(0x)?[0-9a-f]{2,}$|^\d+[a-z]{1,3}$/i;
+
+/**
+ * 主题词缓存（0.4.1）
+ *
+ * 主题词只依赖事件的词集、DF 表与事件总数 N，**不依赖 now** —— 但在 0.3.x 里它
+ * 被塞在 gradeEvents 的主循环里，于是每次工具调用都重算一遍。实测 152 个事件、
+ * 8.3 万个 token，光是这一步就 20.5 ms，占 gradeEvents 总耗时（20.6 ms）的 99%。
+ *
+ * 缓存键 = 条数 | 词数 | N：事件被追加（条数或词数变）或总事件数变（IDF 变）时
+ * 失效，否则直接复用。增量聚类下通常只有最后一个事件失效。
+ */
+const topicCache = new WeakMap();
+
+function computeTopics(ev, df, N) {
+  const K = 6;
+  // idf <= 0.3 等价于 d >= N/e^0.3 - 1；先比次数，省掉每个 token 一次 Math.log
+  const minDf = N / 1.3499 - 1;
+  const best = [];                       // 按权重降序，最多 K 个
+  for (const t of ev.toks) {
+    const len = t.length;
+    if (len < 2) continue;
+    if ((df.get(t) || 1) >= minDf) continue;      // 太常见，没辨识度
+    if (EN_STOP.has(t)) continue;
+    if (JUNK_TOK.test(t)) continue;
+    const idf = Math.log(N / (1 + (df.get(t) || 1)));
+    const w = idf * Math.min(len, 4);
+    // 比当前最差的一个还弱就直接丢，不做插入
+    if (best.length === K && w <= best[K - 1].w) continue;
+    let i = best.length;
+    while (i > 0 && best[i - 1].w < w) i--;
+    best.splice(i, 0, { t, w });
+    if (best.length > K) best.pop();
+  }
+  return best.map((x) => x.t);
+}
+
+function topicsOf(ev, df, N) {
+  const key = `${ev.items.length}|${ev.toks.size}|${N}`;
+  const hit = topicCache.get(ev);
+  if (hit && hit.key === key) return hit.topics;
+  const topics = computeTopics(ev, df, N);
+  topicCache.set(ev, { key, topics });
+  return topics;
+}
 
 /** 给事件算强度与留存 */
 export function gradeEvents(events, now = Date.now(), accessFn = null) {
@@ -412,14 +575,8 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
     const R = Math.pow(1 + POWER_K * (ageH / (S * 24)), -POWER_BETA);
 
     // 主题词：取事件里 IDF 最高的几个（IDF 高 = 不常见 = 有辨识度）
-    const scored = [...ev.toks]
-      .map((t) => ({ t, idf: Math.log(N / (1 + (df.get(t) || 1))), len: t.length }))
-      .filter((x) => x.idf > 0.3 && x.t.length >= 2 && !EN_STOP.has(x.t))
-      // 纯数字型碎片（7811 / 0x1c / 113mb）不是主题，留着只会挤掉真词
-      .filter((x) => !/^(0x)?[0-9a-f]{2,}$/i.test(x.t) && !/^\d+[a-z]{1,3}$/i.test(x.t))
-      .sort((a, b) => b.idf * Math.min(b.len, 4) - a.idf * Math.min(a.len, 4))
-      .slice(0, 6)
-      .map((x) => x.t);
+    // 只依赖词集与 DF，与 now 无关 —— 走事件级缓存，不随每次工具调用重算。
+    const scored = topicsOf(ev, df, N);
 
     const head = firstLine(ev.texts).slice(0, 90);
     const tail = lastLine(ev.texts).slice(0, 90);
