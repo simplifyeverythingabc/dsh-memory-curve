@@ -571,6 +571,55 @@ try {
     fail('增量缓存', e.message.slice(0, 90));
   }
 
+  // ── 0.4.2 蔡加尼克（未完成度）与相对时间
+  try {
+    const evm = await import('../src/events.js');
+
+    // (1) 未完成 / 已收尾的信号必须分得开，且弱信号不误判
+    const openEv = { texts: ['还差最后一步', '剩下三处没改', '下一步验证'], items: [{}, {}, {}] };
+    const doneEv = { texts: ['搞定了', '跑通了', '修好了'], items: [{}, {}, {}] };
+    const weakEv = { texts: ['下一步再说吧'], items: [{}, {}, {}, {}, {}, {}, {}, {}, {}, {}] };
+    const oo = evm.opennessOf(openEv);
+    const od = evm.opennessOf(doneEv);
+    const ow = evm.opennessOf(weakEv);
+    if (!(oo > 0.3)) fail('未完成度', `未完成的只得到 ${oo}，应 >0.3`);
+    else if (!(od < -0.3)) fail('未完成度', `已收尾的只得到 ${od}，应 <-0.3`);
+    else if (ow !== 0) fail('未完成度', `弱信号（1 个词 / 10 条）应判 0，实得 ${ow}`);
+    else ok('未完成度', `未完成 ${oo} / 已收尾 ${od} / 弱信号 ${ow}`);
+
+    // (2) 蔡加尼克：同样结构的事件，未完成的 S 必须更大
+    const mkZ = (id, openness) => ({
+      day: '2026-01-01', startAt: NOW - DAY, lastAt: NOW - DAY,
+      items: new Array(10).fill({}), texts: ['测试'], toks: new Set(['aa', 'bb']),
+      ids: [id], salience: 1, openness,
+    });
+    const gz = evm.gradeEvents([mkZ('z1', 0.8), mkZ('z2', -0.8)], NOW);
+    if (!(gz[0].S > gz[1].S)) fail('蔡加尼克加权', `未完成 S=${gz[0].S} 不高于已收尾 S=${gz[1].S}`);
+    else ok('蔡加尼克加权', `未完成 S=${gz[0].S} > 已收尾 S=${gz[1].S}`);
+
+    // (3) 相对时间按日历日算：23:50 的事，凌晨 02:26 看必须是「昨天」不是「今天」
+    const localNow = new Date(2026, 10, 15, 2, 26).getTime();
+    const lateNight = new Date(2026, 10, 14, 23, 50).getTime();
+    const tTxt = evm.renderForPrompt(
+      [{ idx: 0, level: 'L1', startAt: lateNight, count: 2, S: 8, head: '深夜调试', openness: 0 }],
+      { maxL1: 5, maxL2: 0, maxL3: 0, now: localNow },
+    );
+    if (!tTxt.includes('昨天')) fail('相对时间', `跨午夜应显示「昨天」，实得：${tTxt.split('\n').pop()}`);
+    else if (tTxt.includes('今天')) fail('相对时间', `跨午夜误判成「今天」：${tTxt.split('\n').pop()}`);
+    else ok('相对时间', '11-14 23:50 在 11-15 02:26 显示为「昨天」');
+
+    // (4) 历史补位不能把已经注入过的条目再来一遍
+    const dupTxt = evm.renderForPrompt([
+      { idx: 0, level: 'L3', startAt: localNow - 8 * DAY, count: 2, S: 8, head: 'AAA唯一标记', openness: 0 },
+      { idx: 1, level: 'L5', startAt: localNow - 20 * DAY, count: 2, S: 9, head: 'BBB唯一标记', openness: 0 },
+    ], { maxL1: 0, maxL2: 0, maxL3: 5, now: localNow });
+    const dupN = (dupTxt.match(/AAA唯一标记/g) || []).length;
+    if (dupN > 1) fail('历史补位去重', `同一事件出现了 ${dupN} 次`);
+    else ok('历史补位去重', `L3 里出现过的不再进补位区（出现 ${dupN} 次）`);
+  } catch (e) {
+    fail('蔡加尼克/相对时间', e.message.slice(0, 90));
+  }
+
   // ── 工具有没有真的干活
   const toText = (name, raw) => {
     const tool = tools[name];

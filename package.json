@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-curve",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "按艾宾浩斯遗忘曲线给记忆事件分级：高留存的进上下文，低留存的只留文件。上千条对话压成几百字索引，完整记忆仍在磁盘上按需反查。",
   "type": "module",
   "license": "MIT",

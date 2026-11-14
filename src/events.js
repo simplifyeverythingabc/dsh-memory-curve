@@ -431,7 +431,10 @@ export function clusterEvents(entries) {
   // 情绪显著度只依赖事件文本，与 now 无关。原始信号密度按事件缓存（sigDensity），
   // 增量时只重算「被延长的那一个 + 新增的」，其余直接复用。
   const dirty = Math.max(reuse - 1, 0);
-  for (let i = dirty; i < events.length; i++) events[i].sigDensity = signalDensity(events[i]);
+  for (let i = dirty; i < events.length; i++) {
+    events[i].sigDensity = signalDensity(events[i]);
+    events[i].openness = opennessOf(events[i]);
+  }
   salienceAll(events);
 
   clusterState = { entries, events };
@@ -441,6 +444,38 @@ export function clusterEvents(entries) {
 /** 清空聚类缓存（测试与切换目录时用） */
 export function clearClusterCache() {
   clusterState = null;
+}
+
+/**
+ * 未完成度（蔡加尼克效应，0.4.2）
+ *
+ * Zeigarnik (1927)：被打断的、未完成的任务比已完成的更容易被记住、也更容易
+ * 反复闯进意识 —— 因为目标状态还没达成，认知系统持续给它分配资源。
+ *
+ * 插件这边对应的错：一条「待办 / 还差 / 下一步」和一条「搞定了」在同一套公式下
+ * 完全等价，于是已经收尾的事和还没着落的事一起衰减，而人真正该惦记的是后者。
+ *
+ * 用可计算的信号差来代理：
+ *   未完成 —— 待办、还差、没做、下一步、剩下、下次、继续、暂不、遗留、TODO
+ *   已完成 —— 搞定、完成、通过、修好、上线、解决、跑通、收尾、结束
+ *
+ * 返回 -1 ~ 1（负数是"明显已经收尾"），乘进 S 时映射成 1 - 0.25·openness，
+ * 即未完成的最多慢衰 25%、已完成的最多快衰 25%。
+ */
+const OPEN_SIGNAL = /待办|todo|fixme|下一步|还没做|还没弄|还没修|没搞定|还差|剩下|遗留|搁置|暂不|先不|待确认|待验证|尚未|未完成|没跑|没测/gi;
+const DONE_SIGNAL = /搞定|修好了|跑通了|上线了|合入了|收尾了|已完成|全部通过|全部修完|解决了|弄好了|验证过了/gi;
+
+export function opennessOf(ev) {
+  const txt = (ev.texts || []).join('\n');
+  if (!txt) return 0;
+  const o = (txt.match(OPEN_SIGNAL) || []).length;
+  const d = (txt.match(DONE_SIGNAL) || []).length;
+  // 净信号要有绝对量才作数：28 条消息里出现 1 个「下一步」不代表这件事没着落。
+  // 同时按条数归一，避免长对话天然占优。
+  const net = o - d;
+  if (Math.abs(net) < 3) return 0;
+  const n = Math.max((ev.items || []).length, 1);
+  return Math.max(-1, Math.min(1, net / n));
 }
 
 /**
@@ -558,10 +593,14 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
     // 情绪显著度：cluster 阶段已算好，与 now 无关
     const salience = ev.salience || 1;
 
+    // 蔡加尼克效应：没着落的事保持得更久，已收尾的事衰退更快（见 opennessOf）
+    const open = ev.openness || 0;
+    const zeigarnik = 1 + 0.25 * open;        // 0.75 ~ 1.25
+
     const S = Math.log(1 + n)
       * (1 + 0.35 * Math.log(1 + spanDays))
       * (1 + density / 60)
-      * retrieval * spacing * salience;
+      * retrieval * spacing * salience * zeigarnik;
 
     // 再巩固（reconsolidation）：衰减起点取「最近一次活动」与「最近一次被提取」中
     // 更晚的那个。真实记忆每被想起一次就重新固化一次，遗忘曲线从那一刻重新起算；
@@ -611,6 +650,7 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
       retrieval: Math.round(retrieval * 1000) / 1000,
       spacing: Math.round(spacing * 1000) / 1000,
       salience: Math.round(salience * 1000) / 1000,
+      openness: Math.round(open * 1000) / 1000,
       topics: scored,
       head: head.slice(0, 90),
       tail: tail.slice(0, 90),
@@ -635,6 +675,10 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
     else                               g.level = 'L5';
   }
 
+  // ── 排序键：又强又新 ─────────────────────────────────────────────────
+  // 单看 S 会让「很久以前连聊几小时」霸榜，单看 R 会让「刚才说了句废话」进核心。
+  const rank = (g) => g.R * Math.log(1 + g.S);
+
   // ── 第二道闸：相对配额 ───────────────────────────────────────────────
   // 纯绝对阈值有个结构性毛病：总量越大，够到阈值的事件越多，L1 从 19 涨到 20 再涨
   // 到 30，「核心」就不再是核心了；而注入预算（maxL1/maxL2/maxL3）是固定的，最终
@@ -650,9 +694,6 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
       L2: Math.max(6, Math.round(total * 0.22)),
       L3: Math.max(6, Math.round(total * 0.25)),
     };
-    // 排序键：又强又新。单看 S 会让「很久以前连聊几小时」霸榜，
-    // 单看 R 会让「刚才说了句废话」进核心。
-    const rank = (g) => g.R * Math.log(1 + g.S);
     const demote = (lv, lower) => {
       const list = graded.filter((g) => g.level === lv);
       if (list.length <= quota[lv]) return;
@@ -681,14 +722,47 @@ export const LEVEL_NAME = {
 /** 生成注入用的精简文本：L1 给标题，L2/L3 各给一行 */
 export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, now = Date.now() } = {}) {
   const by = (lv) => graded.filter((g) => g.level === lv);
+
+  /**
+   * 相对时间（0.4.2）
+   *
+   * 人回想事情用的是「昨天那个」「上周那个」，不是「11-14 那个」—— 绝对日期要
+   * 先做一次心算才知道有多久。注入文本给相对时间，模型不需要算就能判断新旧。
+   *
+   * **按日历日算，不按小时差**：11-14 23:50 距现在只有两小时，但人说的是「昨天」，
+   * 不是「今天」。早期的实现用 Math.floor(小时差/24) 得到 0，于是凌晨两点会看到
+   * 「今天(11-14)」这种自相矛盾的输出。
+   */
+  const dayDiff = (ms) => {
+    const a = new Date(ms);
+    const b = new Date(now);
+    const da = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
+    const db = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+    return Math.round((db - da) / 86400000);
+  };
+  const ago = (ms) => {
+    const days = dayDiff(ms);
+    if (days <= 0) return '今天';
+    if (days === 1) return '昨天';
+    if (days < 7) return `${days}天前`;
+    if (days < 14) return '上周';
+    if (days < 60) return `${Math.floor(days / 7)}周前`;
+    return `${Math.floor(days / 30)}个月前`;
+  };
+
   // 标题用事件首句（人话），主题词只做补充。
   // 之前用 topics 拼接，结果全是 7811/dock/catch 这种技术碎片，看不出是什么事。
   const line = (g) => {
     const d = new Date(g.startAt);
     const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const title = (g.head || '').replace(/[`*#|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 42);
-    return `- ${md} ${g.count}条　${title}`;
+    // ▸ = 还没着落（蔡加尼克）：这类事最该被提起，也最容易被回想起
+    const flag = (g.openness || 0) >= 0.3 ? '▸' : '';
+    return `- ${flag}${ago(g.startAt)}(${md}) ${g.count}条　${title}`;
   };
+
+  // 排序权重：未完成的事加权。人不是按「强度」回忆事情，而是按「还没解决」。
+  const weight = (g) => g.S * (1 + 0.3 * Math.max(g.openness || 0, 0));
   const out = [];
   // 时间分层保底：不能按「取最后 N 个」，否则热闹的一天会把历史全挤掉
   // （实测 L1 111 条里今天占 104 条，注入时前 12 条全是今天的执行细节）。
@@ -717,9 +791,18 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, now
   };
 
   const l1 = layered(by('L1'), maxL1, { today: 4, week: 4, older: 4 });
-  // slice(-0) 等价 slice(0)，会把全部返回 —— maxL2=0 必须真的是一条都不给
-  const l2 = maxL2 > 0 ? by('L2').slice(-maxL2) : [];
-  const l3 = maxL3 > 0 ? by('L3').slice(-maxL3) : [];
+  // L2/L3 以前是 slice(-N) 纯取最新，等于「等级内也按时间排」，和 L1 的时间桶逻辑
+  // 不一致：一条三天前但还没着落的事，会被今天一条收尾了的事挤掉。改成按 weight
+  // 取前 N，输出再按时间排。
+  const topBy = (pool, n) => {
+    if (!(n > 0)) return [];               // maxLx=0 必须真的是一条都不给
+    return pool.slice()
+      .sort((a, b) => weight(b) - weight(a))
+      .slice(0, n)
+      .sort((a, b) => a.startAt - b.startAt);
+  };
+  const l2 = topBy(by('L2'), maxL2);
+  const l3 = topBy(by('L3'), maxL3);
   if (l1.length) out.push('【L1 核心事件 · 常驻】', ...l1.map(line));
   if (l2.length) out.push('', '【L2 长期事件】', ...l2.map(line));
   if (l3.length) out.push('', '【L3 活跃事件 · 只留索引】', ...l3.map(line));
@@ -741,8 +824,11 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, now
   };
   const isChat = (g) => /\[QQ(私聊|群)?\]/.test((g.head || '') + (g.texts || []).join('').slice(0, 200));
 
+  // 历史补位必须排除已经注入过的：以前没有这一步，
+  // L3 里刚出现过的条目会在「更早 · 按 S 补位」里原样再来一遍，白占 4 行预算。
+  const shown = new Set([...l1, ...l2, ...l3].map((g) => g.idx));
   const olderPool = graded
-    .filter((g) => (now - g.startAt) / DAY2 >= 7)
+    .filter((g) => (now - g.startAt) / DAY2 >= 7 && !shown.has(g.idx))
     .map((g) => ({ g, w: g.S * (isChat(g) ? 0.25 : 1) * (1 + technicality(g)) }))
     .sort((a, b) => b.w - a.w)
     .slice(0, 4)
