@@ -437,13 +437,175 @@ export function clusterEvents(entries) {
   }
   salienceAll(events);
 
-  clusterState = { entries, events };
+  // 实体指纹与主题线（0.5.0）：只依赖词集与全局 DF，与 now 无关，随 cluster 缓存。
+  // 顺手把 df 预热进 docFreq 的 WeakMap —— gradeEvents 马上要用同一份，
+  // 这里算过就不会再遍历一遍 8 万个 token。
+  const { df, N } = docFreq(events);
+  for (const ev of events) ev.entities = entitiesOf(ev, df, N);
+  const threads = linkThreads(events);
+
+  clusterState = { entries, events, threads };
   return events;
+}
+
+/** 取最近一次聚类算出的主题线（renderForPrompt 用；没算过返回空） */
+export function currentThreads() {
+  return clusterState ? clusterState.threads : [];
 }
 
 /** 清空聚类缓存（测试与切换目录时用） */
 export function clearClusterCache() {
   clusterState = null;
+}
+
+/**
+ * 实体指纹（0.5.0）
+ *
+ * 「主题线」要判断两段对话是不是在说同一件事。前面试过词集 Jaccard、共享稀有词数，
+ * 都不行 —— 中文二元切词下事件平均 546 个 token，同天事件对 Jaccard 最高只有 0.26，
+ * 而「共享稀有词」会把 QQ 群闲聊和插件调试判成同一件事（它们共享 50 个高频技术词）。
+ *
+ * 换成**标识符指纹**之后才分得开：真实的工作线索留下的痕迹是具体的 —— 文件名、
+ * 函数名、哈希、常量名。`eada617`、`getSnapshot`、`thresholdChars` 这些东西
+ * 不会在闲聊里出现，也不会跨话题重合。
+ *
+ * 判据（三条同时满足）：
+ *   长度 >= 7 或含下划线 —— 排除 begin / notes / users 这类通用短词
+ *   含至少一个字母       —— 排除 3603 / 4521 这类行号与字节数
+ *   df <= maxDf          —— 全库最多这么多个事件用过，才有辨识度
+ *
+ * **df 上限必须随数据量缩放**：写死 3 的话，同一个词在 3 倍数据里自然出现 3 次以上，
+ * 整个指纹表会被清空（实测把 21 天数据复制 5 份后，线数从 3 掉到 0）。所以按 N/50
+ * 抬上限，保证「稀有」始终是相对当前语料而言的。
+ *
+ * 实测（21 天 / 152 事件真实数据）：同天指纹重合 >= 3 的只有 13 对，人工看全是
+ * 真相关（发布链路、面板调试、purge 移植）；跨天重合 >= 4 只有 3 对，也全对。
+ */
+export const ENT_MIN_LEN = 7;
+export const ENT_KEEP = 24;
+
+export function entitiesOf(ev, df, N = 1) {
+  const maxDf = Math.max(3, Math.round(N / 50));
+  const out = [];
+  for (const t of ev.toks) {
+    if (t.length < ENT_MIN_LEN && !t.includes('_')) continue;
+    if (!/[a-z]/.test(t)) continue;
+    if ((df.get(t) || 0) > maxDf) continue;
+    out.push(t);
+  }
+  // df 小的优先，同样稀有取更长的（更可能是指标符而非普通长词）
+  out.sort((a, b) => ((df.get(a) || 0) - (df.get(b) || 0)) || (b.length - a.length));
+  return new Set(out.slice(0, ENT_KEEP));
+}
+
+/** 两条线的实体重合判定：同天 3 个，跨天 4 个 */
+export const THREAD_SAME_DAY = 3;
+export const THREAD_CROSS_DAY = 4;
+
+/**
+ * 把事件串成「主题线」。
+ *
+ * 这是插件原始承诺（「上千条对话压成几百字索引」）真正该有的形态：人回想事情不是
+ * 按「哪天哪条」，而是按「那条线」—— 「我在改这个插件」「发布链路那摊事」。
+ * 0.4.x 的注入只是把事件按等级罗列，读起来更像日志而不是记忆。
+ *
+ * 用并查集：同天重合 >= 3 或跨天重合 >= 4 就并到一起。链式传递（A-B、B-C 但 A-C
+ * 不重合）也算一条线 —— 真实的事情本来就是这样推进的。
+ *
+ * @returns {Array<{members, startAt, lastAt, items, openness, head, label, level}>}
+ */
+export function linkThreads(events) {
+  const n = events.length;
+  const parent = new Array(n);
+  for (let i = 0; i < n; i++) parent[i] = i;
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+
+  // 倒排索引：实体 -> 出现过它的事件下标。
+  // 之前是事件两两全比较（O(n²)），572 个事件就是 16 万对 —— 实测占掉冷启动 40ms。
+  // 实际上绝大多数事件对**一个实体都不共享**，比较它们纯属浪费。走倒排之后只比较
+  // 共享过实体的事件对，复杂度降到 O(Σ 每个实体的出现次数²)。
+  const inv = new Map();
+  for (let i = 0; i < n; i++) {
+    const ents = events[i].entities;
+    if (!ents || !ents.size) continue;
+    for (const t of ents) {
+      let l = inv.get(t);
+      if (!l) { l = []; inv.set(t, l); }
+      l.push(i);
+    }
+  }
+  // 一个实体铺到 60 个以上事件里就太泛了（比如通用文件名），拿它当线索只会误连
+  const pair = new Map();          // i*n+j -> 共享实体个数（i<j 恒成立，见下）
+  for (const list of inv.values()) {
+    const m = list.length;
+    if (m < 2 || m > 60) continue;
+    for (let a = 0; a < m; a++) {
+      for (let b = a + 1; b < m; b++) {
+        const k = list[a] * n + list[b];
+        pair.set(k, (pair.get(k) || 0) + 1);
+      }
+    }
+  }
+  for (const [k, c] of pair) {
+    const i = Math.floor(k / n);
+    const j = k % n;
+    const need = events[i].day === events[j].day ? THREAD_SAME_DAY : THREAD_CROSS_DAY;
+    if (c >= need) union(i, j);
+  }
+
+  const groups = new Map();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    let g = groups.get(r);
+    if (!g) { g = []; groups.set(r, g); }
+    g.push(events[i]);
+  }
+
+  const threads = [];
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;          // 单件不成线，仍走原来的等级注入
+    const startAt = Math.min(...members.map((m) => m.startAt));
+    const lastAt = Math.max(...members.map((m) => m.lastAt));
+    // 只认**跨天**的线。同一天里两条内容相近的事件是「同一次讨论」，本来就该
+    // 分开列（那不是推进，是重复）；真正值得当成一条线看的是「隔了几天还在弄
+    // 这件事」—— 那才是记忆里的「图式」。
+    if (dayOf(startAt) === dayOf(lastAt)) continue;
+    const items = members.reduce((a, m) => a + m.items.length, 0);
+    // 线的未完成度取成员最大值：线上只要有一件还没着落，这条线就是没完的事。
+    // 用平均会被已完成的那几件稀释掉（实测 5 件里有 1 件开着，平均只剩 0.06）。
+    const openness = Math.max(...members.map((m) => m.openness || 0));
+    let label = '';
+    let common = null;
+    for (const t of members[0].entities) {
+      if (![...members].every((m) => m.entities.has(t))) continue;
+      if (!common || t.length > common.length) common = t;
+    }
+    if (common) {
+      label = common;
+    } else {
+      // 没有全体共享的实体（链式相连的线本来就这样），退一步取「出现次数最多」的
+      // 实体 —— 它仍然是有辨识度的锚点。
+      // 最后才用首句：首句常常是半句话（「等一下，文件从…」），当标题很糟，
+      // 只在前两条路都走不通时兜底。
+      const cnt = new Map();
+      for (const m of members) for (const t of m.entities) cnt.set(t, (cnt.get(t) || 0) + 1);
+      let best = null;
+      let bestN = 1;
+      for (const [t, c] of cnt) {
+        if (c > bestN || (c === bestN && best && t.length > best.length)) { best = t; bestN = c; }
+      }
+      if (best) label = best;
+      else {
+        const first = members.slice().sort((a, b) => a.startAt - b.startAt)[0];
+        label = (first.texts && first.texts[0] ? first.texts[0] : '').replace(/[`*#|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 26);
+      }
+    }
+    threads.push({ members, startAt, lastAt, items, openness, label });
+  }
+  // 排前面的是「件数多、且最近还在动」的线 —— 那才是当下正在推进的事
+  threads.sort((a, b) => (b.members.length - a.members.length) || (b.lastAt - a.lastAt));
+  return threads;
 }
 
 /**
@@ -720,7 +882,7 @@ export const LEVEL_NAME = {
 };
 
 /** 生成注入用的精简文本：L1 给标题，L2/L3 各给一行 */
-export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, now = Date.now() } = {}) {
+export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, maxThreads = 3, threads = null, now = Date.now() } = {}) {
   const by = (lv) => graded.filter((g) => g.level === lv);
 
   /**
@@ -764,6 +926,29 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, now
   // 排序权重：未完成的事加权。人不是按「强度」回忆事情，而是按「还没解决」。
   const weight = (g) => g.S * (1 + 0.3 * Math.max(g.openness || 0, 0));
   const out = [];
+
+  // ── 主题线（0.5.0）──────────────────────────────────────────────────
+  // 人回想事情是按「那条线」而不是「哪天哪条」。这一段的作用是让模型一眼看出
+  // 「最近在推进哪几件事」，而不是从下面 12 条事件里自己归纳 —— 归纳要么不做，
+  // 要么每次都得重做，还容易归纳错。
+  //
+  // 放在最前面，且只占 3 行：它是「目录」，不是正文。具体的还在下面。
+  if (maxThreads > 0 && threads && threads.length) {
+    const mdOf = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const rows = threads.slice(0, maxThreads).map((t) => {
+      const span = mdOf(t.startAt) === mdOf(t.lastAt)
+        ? mdOf(t.startAt)
+        : `${mdOf(t.startAt)}→${ago(t.lastAt)}`;
+      const state = (t.openness || 0) >= 0.15 ? '推进中' : '已收尾';
+      const label = String(t.label || '').replace(/[`*#|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 30);
+      return `- ${label}｜${span}｜${t.members.length}件 ${t.items}条｜${state}`;
+    });
+    out.push('【主题线 · 在推进什么】', ...rows, '');
+  }
+
   // 时间分层保底：不能按「取最后 N 个」，否则热闹的一天会把历史全挤掉
   // （实测 L1 111 条里今天占 104 条，注入时前 12 条全是今天的执行细节）。
   // 给三个时间桶各留保底名额，桶内按 S 竞争，剩余名额再跨桶抢。

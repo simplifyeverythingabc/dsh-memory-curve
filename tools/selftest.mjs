@@ -101,7 +101,7 @@ try {
     const required = [
       'disabled', 'memoryDir', 'maxL1', 'maxL2', 'maxL3', 'injectContext',
       'autoCollect', 'collectSubagents', 'collectExcludeCwds', 'collectExcludeSessions',
-      'collectFlushMs', 'collectScanMs', 'collectSummaryMs',
+      'collectFlushMs', 'collectScanMs', 'collectSummaryMs', 'maxThreads',
     ];
     const missing = required.filter((k) => !cfg.dict[k]);
     if (missing.length) fail('Config 字段', '缺 ' + missing.join(', '));
@@ -643,6 +643,74 @@ try {
     else ok('报告公式文案', '幂律 / 再巩固 / 相对配额三项都在，无旧指数残留');
   } catch (e) {
     fail('报告公式文案', e.message.slice(0, 90));
+  }
+
+  // ── 0.5.0 主题线
+  //
+  // 线的价值全在「跨天」：同一天两条内容相近的事件是「同一次讨论」，本来就该分开列；
+  // 隔了几天还在弄同一件事才是「图式」。所以第一条断言就是「同天不许成线」。
+  try {
+    const evm = await import('../src/events.js');
+    const thDir = join(root, 'thread-memory');
+    mkdirSync(thDir, { recursive: true });
+
+    // day1 与 day3 共用标识符 A；day2 与 day4 共用标识符 B；day1 内部两条也共用 C
+    const mk = (day, lines) => {
+      const out = [];
+      lines.forEach(([hh, text], i) => {
+        out.push(`${day} ${hh}:00 ［用户］ <!-- m_${day.replace(/-/g, '')}_${String(i + 1).padStart(6, '0')} -->`);
+        out.push(text);
+        out.push('');
+      });
+      return out.join('\n');
+    };
+    const A = ['threadmarker_alpha', 'threadmarker_alpha2', 'threadmarker_alpha3', 'threadmarker_alpha4'];
+    const B = ['threadmarker_beta', 'threadmarker_beta2', 'threadmarker_beta3', 'threadmarker_beta4'];
+    const C = 'samethread_gamma';
+    writeFileSync(join(thDir, '2026-04-01.md'), mk('2026-04-01', [
+      ['10', `讨论 ${A.join(' ')} 与 ${C} 的第一段`],
+      ['11', `继续 ${A.join(' ')} 与 ${C} 的第二段`],
+    ]), 'utf8');
+    writeFileSync(join(thDir, '2026-04-02.md'), mk('2026-04-02', [
+      ['10', `讨论 ${B.join(' ')} 的段落`],
+    ]), 'utf8');
+    writeFileSync(join(thDir, '2026-04-03.md'), mk('2026-04-03', [
+      ['10', `又是 ${A.join(' ')} 的事`],
+    ]), 'utf8');
+    writeFileSync(join(thDir, '2026-04-04.md'), mk('2026-04-04', [
+      ['10', `又是 ${B.join(' ')} 的事`],
+      ['20', '毫不相关的一段话'],
+    ]), 'utf8');
+
+    evm.clearEntryCache();
+    evm.clearClusterCache();
+    const tev = evm.clusterEvents(evm.readEntries(thDir));
+    const th = evm.currentThreads();
+
+    const crossOk = th.every((t) => {
+      const days = new Set(t.members.map((m) => m.day));
+      return days.size >= 2;
+    });
+    if (!th.length) fail('主题线', '一条线都没生成');
+    else if (!crossOk) fail('主题线', '出现了同天内部的线（应只认跨天）');
+    else {
+      const hasA = th.some((t) => t.members.some((m) => (m.texts[0] || '').includes(A[0])));
+      const hasB = th.some((t) => t.members.some((m) => (m.texts[0] || '').includes(B[0])));
+      if (!hasA || !hasB) fail('主题线', `跨天共用的标识符没连成线（A=${hasA} B=${hasB}）`);
+      else ok('主题线', `${th.length} 条跨天线，同天事件未误连`);
+    }
+
+    // maxThreads=0 必须关掉整段
+    const g = evm.gradeEvents(tev, Date.now(), null);
+    const off = evm.renderForPrompt(g, { maxL1: 0, maxL2: 0, maxL3: 0, maxThreads: 0, threads: th, now: Date.now() });
+    if (off.includes('主题线')) fail('主题线开关', 'maxThreads=0 仍然注入了主题线段');
+    else {
+      const on = evm.renderForPrompt(g, { maxL1: 0, maxL2: 0, maxL3: 0, maxThreads: 2, threads: th, now: Date.now() });
+      if (!on.includes('主题线')) fail('主题线开关', 'maxThreads=2 没注入主题线段');
+      else ok('主题线开关', 'maxThreads=0 关闭 / =2 正常注入');
+    }
+  } catch (e) {
+    fail('主题线', e.message.slice(0, 90));
   }
 
   // ── 工具有没有真的干活

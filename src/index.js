@@ -29,7 +29,7 @@ import { join } from 'node:path';
  * 代价：仓库目录 / CI 里没有这个包时模块加载会失败 —— CI 里造个 stub 顶上。
  */
 import z from '@deepseek-ai/schemastery';
-import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } from './events.js';
+import { readEntries, clusterEvents, gradeEvents, renderForPrompt, currentThreads, LEVEL_NAME } from './events.js';
 import { resolveMemDir, dshHome, normalizeDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL } from './access.js';
@@ -108,6 +108,12 @@ export const Config = z.object({
     .description('是否把记忆索引注入系统提示。设 false 后索引不再占每步 token，六个 memory_curve_* 工具照常可用，按需现查。'),
   maxL2: z.number().min(0).max(200).default(20).description('L2 事件最多列几条。'),
   maxL3: z.number().min(0).max(200).default(8).description('L3 事件最多列几条。'),
+  maxThreads: z
+    .number()
+    .min(0)
+    .max(20)
+    .default(3)
+    .description('「主题线」最多列几条（把同一条线索上的多个事件压成一行）。设 0 关闭这一段。'),
   autoCollect: z.boolean().default(false).description('启用会话消息自动采集、启动补漏和摘要刷新；只保存用户与助手正文。'),
   collectSubagents: z.boolean().default(false).description('自动采集是否包含子代理；默认排除，不影响已有流水。'),
   collectExcludeCwds: z.string().default('').description('排除的工作目录，换行或分号分隔，包含其子目录。'),
@@ -194,7 +200,7 @@ const digestDir = () => join(dshHome(), 'memory-notes', '_digest');
 const gradeFile = () => join(dshHome(), 'memory-notes', '_事件分级.md');
 const accessFile = () => join(dshHome(), 'memory-notes', '_access.json');
 
-const MAX_L1 = 12, MAX_L2 = 20, MAX_L3 = 8, INDEX_DAYS = 10;
+const MAX_L1 = 12, MAX_L2 = 20, MAX_L3 = 8, MAX_THREADS = 3, INDEX_DAYS = 10;
 
 const PAD = (n) => String(n).padStart(2, '0');
 const dayOf = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${PAD(d.getMonth() + 1)}-${PAD(d.getDate())}`; };
@@ -401,7 +407,12 @@ export function apply(ctx, config = {}) {
     if (readCache.text && nowMs - readCache.at < READ_TTL) return readCache.text;
     try {
       const { entries, events, graded } = build();
-      const body = renderForPrompt(graded, { maxL1, maxL2, maxL3, now: Date.now() });
+      const body = renderForPrompt(graded, {
+        maxL1, maxL2, maxL3,
+        maxThreads: num(config.maxThreads, MAX_THREADS),
+        threads: currentThreads(),
+        now: Date.now(),
+      });
       const c = {};
       for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
       const idx = dayIndex(graded);
