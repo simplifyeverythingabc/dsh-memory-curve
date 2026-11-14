@@ -194,8 +194,12 @@ export function buildDailies(arg) {
     // 少了这个，+N 事件的回查就是坏的（范围展开会拉进不属于该事件的 ID）。
     const map = {};
     for (const g of list) {
-      const at = new Date(g.startAt);
-      const key = `e_${day.replace(/-/g, '')}_${String(at.getHours()).padStart(2, '0')}${String(at.getMinutes()).padStart(2, '0')}`;
+      // 必须用 gradeEvents 给出的 eventKey，不能拿 startAt 重算。
+      // 同一分钟可以起多个事件（批量导入、子代理并发），gradeEvents 已经给后出现的
+      // 加了 _2、_3 后缀；这里重算就退回成裸键，两个事件写同一个键 -> 后写覆盖先写，
+      // 按 event 键取全量会拿到别人的条目。
+      const key = g.eventKey;
+      if (!key) continue;
       map[key] = { ids: g.ids || [], count: g.count, level: g.level };
     }
     writeFileSync(join(digestDir, `${day}.ids.json`), JSON.stringify(map), 'utf8');
@@ -371,6 +375,7 @@ export function readByIds(arg) {
   }
   const { memDir, ids, maxChars = 4000 } = arg || {};
   const res = [];
+  const picked = [];        // 真正塞进结果的 id —— 调用方用它记访问，别拿 pool 去切
   let used = 0;
   let truncated = 0;
   for (const id of ids) {
@@ -383,12 +388,14 @@ export function readByIds(arg) {
       if (res.length === 0) {
         res.push(one.text.slice(0, Math.max(200, maxChars - 120))
           + `\n…（本条 ${one.text.length} 字符，已截断到 ${maxChars} 上限；加大 maxChars 取全文）`);
+        picked.push(one.id ?? id);
         truncated = 1;
         used = maxChars;
       }
       break;
     }
     res.push(one.text);
+    picked.push(one.id ?? id);
     used += one.text.length;
   }
   return {
@@ -396,6 +403,7 @@ export function readByIds(arg) {
     total: ids.length,
     truncated,
     text: res.join('\n\n'),
+    picked,
   };
 }
 
@@ -447,20 +455,30 @@ function assertDay(day, where) {
  * 所以限长度 + 拒绝嵌套量词，挡不住的极端形状留给下面的正文长度上限兜。
  */
 const REGEX_MAX = 200;
+// 两条形状黑名单：
+//   ① 分组/字符类里带量词，外面再套量词 —— `/^(a+)+$/`
+//   ② 分组里出现交替、外面套量词 —— `/^(a|aa)+$/`
+// 都能让回溯爆炸。②是「嵌套量词」检测漏掉的：它没有内层量词，靠分支长度重叠
+// 制造指数级回溯，实测 60 字符就超 2 秒。宁可误伤 (foo|bar)+ 这种无害写法 ——
+// 报错信息会说明怎么绕，静默放行挂死主循环更糟。
 const NESTED_QUANT = /(\([^()]*[+*][^()]*\)|\[[^\]]*\][+*])[+*]/;
+const ALT_QUANT = /\([^()]*\|[^()]*\)[+*]/;
 
 export function makeMatcher(pattern) {
   const s = String(pattern ?? '').trim();
   if (s.length >= 2 && s.startsWith('/') && s.endsWith('/')) {
     const body = s.slice(1, -1);
-    if (body.length <= REGEX_MAX && !NESTED_QUANT.test(body)) {
+    if (body.length <= REGEX_MAX && !NESTED_QUANT.test(body) && !ALT_QUANT.test(body)) {
       try { return { re: new RegExp(body, 'i'), literal: false, src: s }; }
       catch { /* 正则写错就当字面量 */ }
     } else {
       // 不静默退化成字面量 —— 那会让调用方以为正则在跑却其实没跑。
-      throw new TypeError(
-        `正则过长或含嵌套量词（容易灾难性回溯）：${s.length > REGEX_MAX ? `长度 ${body.length} > ${REGEX_MAX}` : '匹配到 (x+)+ 一类结构'}`,
-      );
+      const why = body.length > REGEX_MAX
+        ? `长度 ${body.length} > ${REGEX_MAX}`
+        : ALT_QUANT.test(body)
+          ? '分组里有交替又套了量词（如 (a|aa)+），回溯会指数爆炸'
+          : '含嵌套量词（如 (a+)+），回溯会指数爆炸';
+      throw new TypeError(`正则被拒绝：${why}。改用字面量搜索，或把分支拆成多个简单匹配。`);
     }
   }
   const esc = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -745,7 +763,8 @@ export function eventIds(arg) {
     throw new TypeError('eventIds 的参数改成了对象形式：eventIds({ digestDir, eventKey })');
   }
   const { digestDir, eventKey } = arg || {};
-  const m = /^e_(\d{4})(\d{2})(\d{2})_\d{4}$/.exec(String(eventKey || ''));
+  // 允许 _2、_3 这类后缀：同一分钟多个事件时 gradeEvents 会加序号。
+  const m = /^e_(\d{4})(\d{2})(\d{2})_\d{4}(?:_\d+)?$/.exec(String(eventKey || ''));
   if (!m) return null;
   const day = `${m[1]}-${m[2]}-${m[3]}`;
   const p = join(digestDir, `${day}.ids.json`);

@@ -2,6 +2,30 @@
 
 格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 来，版本号照 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.9] - 2026-11-15
+
+第三轮外部评审的收口。其中两项是 0.3.8 没修透，一项是 0.3.8 自己引入的回归。
+
+### 修复
+
+- **`ids.json` 用重算的键覆盖了 `eventKey`**（0.3.8 没修透）：`buildDailies` 写旁挂索引时又拿 `startAt` 算了一遍基键，把 `gradeEvents` 给出的 `_2`、`_3` 后缀丢掉了。同一分钟两个事件写同一个键，后写覆盖先写。现在直接用 `g.eventKey`。
+- **`eventIds` 正则不接受 `_2` 后缀**（0.3.8 没修透）：`^e_\d{8}_\d{4}$` 解析不了带序号的键。补成 `(?:_\d+)?`。实测 `e_20260115_1000_2` 现在能取回自己的 2 条。
+- **`mergeDay` 把日期标题当批注，每合并一次多一行**（0.3.8 引入的回归）：0.3.8 保留 orphans 时没剥掉 `nextBody` 自己写的 `${day}` 标题行，于是它被当成批注保存，下一轮又被收一次。实测三轮合并后日期行仍是 1、批注 1 份、条目 6 条。现在写入前先剥掉开头的日期行。
+- **`withLock` 遇到损坏的 `owner.json` 永久 `ELOCKED`**：`JSON.parse` 失败时 `err.code` 是 undefined，而分支只处理 `ENOENT`，`alive` 保持 true，于是谁也别想再写。现在读不出可信 owner 就按「锁可能已死」处理，靠锁目录 mtime 兜底。
+- **`memory_curve_raw` 的访问计数记错对象**：`pool.slice(0, found)` 在 pool 含缺失 id 时把缺失项记成「查过」，真正返回的后一条没记；截断时同样错位。`readByIds` 现在回传实际取到的 `picked`，`touch` 用它。
+- **`check.mjs` 控制字节范围漏 `\u000D`**：裸 CR 不算行尾归一化的目标，应该被拦。范围补上。
+- **ReDoS 守卫漏 `(a|aa)+` 这种形状**：它没有内层量词，靠分支长度重叠制造指数回溯，实测 60 字符就超 2 秒。新增交替分支量词检测，宁可误伤 `(foo|bar)+` 也要挡住。
+
+### 变更
+
+- `package.json` 的 `exports` 补 `"./digest": "./src/digest.js"` —— README 里写的 JS API 大半在 digest 上，之前外部 import 不到。
+- `memory_curve_day` 遇到格式不对的日期改为返回友好提示，不再把 `assertDay` 的 TypeError 冒给模型。
+- 工具描述里的 id 示例从 `m_20261109_000087`（十进制序号，早期形态）改成 `m_20261109_a1b2c3`（六位十六进制），与实际哈希一致。
+- `renderForPrompt` 调用处透传 `now`，避免跨午夜时分级与渲染用两个不同时刻。
+- `ensureConfiguredDir` 的注释改成符合实现：同目录只建一次，外部删掉不会自动重建。
+
+---
+
 ## [Unreleased]
 
 ### 计划中

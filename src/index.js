@@ -154,7 +154,7 @@ let lastEnsuredDir = null;
 const ensureConfiguredDir = () => {
   const dir = configuredMemDir();
   if (!dir) { lastEnsuredDir = null; return; }
-  if (dir === lastEnsuredDir) return;
+  if (dir === lastEnsuredDir) return;   // 同目录只建一次；目录若被外部删掉不会自动重建，getDir 失败时会把 lastEnsuredDir 清空重试
   lastEnsuredDir = dir;
   try {
     if (!existsSync(dir)) {
@@ -391,7 +391,7 @@ export function apply(ctx, config = {}) {
     if (readCache.text && nowMs - readCache.at < READ_TTL) return readCache.text;
     try {
       const { entries, events, graded } = build();
-      const body = renderForPrompt(graded, { maxL1, maxL2, maxL3 });
+      const body = renderForPrompt(graded, { maxL1, maxL2, maxL3, now: Date.now() });
       const c = {};
       for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
       const idx = dayIndex(graded);
@@ -569,6 +569,10 @@ export function apply(ctx, config = {}) {
       async execute(args) {
         const day = String(args?.day || '').trim();
         if (!day) return { text: '要给个日期，例如 2026-11-09' };
+        // assertDay 会对手误格式抛 TypeError；这里转成提示，别把异常冒给模型。
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+          return { text: `日期要写成 YYYY-MM-DD（收到 ${JSON.stringify(day)}），例如 2026-11-09` };
+        }
         const t = readDigest({ digestDir: digestDir(), day });
         if (t) return { text: t };
         // 摘要没生成过就现做 —— 只补这一天。不传 days 会把全部日子的摘要
@@ -585,7 +589,7 @@ export function apply(ctx, config = {}) {
       name: 'memory_curve_raw',
       description: [
         '回查原始记忆。三种用法，优先用 id：',
-        '  ① id：某个 memory_id（如 m_20261109_000087），精确取那一条；',
+        '  ① id：某个 memory_id（如 m_20261109_a1b2c3），精确取那一条；',
         '  ② ids：一串 memory_id，批量取；',
         '  ③ day + pattern：按日期 + 关键词/正则模糊找。',
         '摘要里每条事实后面都带 id，顺手抄过来查，别凭摘要猜。',
@@ -593,7 +597,7 @@ export function apply(ctx, config = {}) {
       parameters: {
         type: 'object', additionalProperties: false,
         properties: {
-          id: { type: 'string', description: '单个 memory_id，形如 m_20261109_000087' },
+          id: { type: 'string', description: '单个 memory_id，形如 m_20261109_a1b2c3' },
           ids: { type: 'array', items: { type: 'string' }, description: '元素可为单条 m_xxx、事件键 event:e_yyyyMMdd_HHmm、或范围 m_a..m_b。注意：哈希 id 不能算术展开，范围只取首尾两条；要全量请用事件键' },
           day: { type: 'string', description: '日期，如 2026-11-09' },
           pattern: { type: 'string', description: '关键词或正则；留空返回当天开头若干条' },
@@ -651,9 +655,10 @@ export function apply(ctx, config = {}) {
           }
           if (!pool.length) return { text: `范围内没命中${pat ? `「${pat}」` : ''}（检查 ${ids.length} 条）` };
           const r = readByIds({ memDir: memDir(), ids: pool, maxChars });
-          // 只记「真正进入上下文」的那几条（受 maxChars 限制，实际取到 r.found 条）。
-          // 整组 pool 全记会把没返回的也标成「被查过」，冷热信号就废了。
-          touch(accessFile(), pool.slice(0, r.found), 'raw:ids');
+          // 只记「真正进入上下文」的那几条。以前用 pool.slice(0, r.found)：
+          // pool 里夹着缺失 id 时，被记成「查过」的是缺失项，真正返回的后一条没记，
+          // 截断时（found < pool.length）同样错位。readByIds 现在把实际取到的 id 回传。
+          touch(accessFile(), [...new Set(r.picked)], 'raw:ids');
           const head = pat ? `范围内命中 ${pool.length}/${ids.length} 条` : `共 ${r.total} 条`;
           const tail = r.found < r.total ? `\n\n（本次只取到 ${r.found} 条，受 maxChars=${maxChars} 限制；要更多就加大 maxChars 或用 pattern 缩小）` : '';
           return { text: `# ${head}\n\n${r.text}${tail}` };

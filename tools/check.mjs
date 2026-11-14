@@ -74,7 +74,7 @@ if (missing.length) {
     if (titleCount !== 1) problems.push(`「# Changelog」出现 ${titleCount} 次，应恰好 1 次`);
     const secs = lines.filter((l) => /^## \[/.test(l));
     if (secs.length && !/^## \[Unreleased\]/.test(secs[0])) problems.push(`第一个版本节是「${secs[0]}」，Unreleased 必须在最前`);
-    if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(norm)) problems.push('含不可见控制字节（退格/VT/FF/裸 CR 等）');
+    if (/[\u0000-\u0008\u000B\u000C\u000D\u000E-\u001F]/.test(norm)) problems.push('含不可见控制字节（退格/VT/FF/裸 CR 等）');
     if (problems.length) {
       console.error(`CHANGELOG.md 结构错误：${problems.join('；')}`);
       process.exit(1);

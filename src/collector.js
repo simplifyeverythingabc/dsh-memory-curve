@@ -154,7 +154,12 @@ async function withLock(memDir, fn) {
       if (!Number.isInteger(p) || p <= 0) throw new Error('Invalid lock owner');
       try { process.kill(p, 0); } catch (err) { if (err.code === 'ESRCH') alive = false; }
     } catch (err) {
-      if (err.code === 'ENOENT') alive = Date.now() - (await fs.stat(lock)).mtimeMs < 60000;
+      // owner.json 读到一半、磁盘满、内容被写坏 —— 这些 err.code 都不是 ENOENT，
+      // 以前只处理 ENOENT，alive 保持 true，于是永久 ELOCKED：谁也别想再写。
+      // 读不出可信 owner 就按「锁可能已死」处理，靠 mtime 兜底判断。
+      if (err.code === 'ENOENT' || err.code === undefined || err.code === 'EACCES') {
+        alive = Date.now() - (await fs.stat(lock)).mtimeMs < 60000;
+      }
     }
     if (alive) throw Object.assign(new Error('Another memory collector holds the write lock; retry later'), { code: 'ELOCKED' });
     // Rename before removal: only one contender can adopt a dead lock.
@@ -204,7 +209,11 @@ async function mergeDay(memDir, day, messages) {
   }
   const body = begin >= 0 ? old.slice(begin + BEGIN.length, end) : '';
   const outside = begin >= 0 ? old.slice(0, begin) + old.slice(end + END.length) : old;
-  const { blocks, orphans } = blocksIn(body);
+  const { blocks, orphans: rawOrphans } = blocksIn(body);
+  // 首个 HEAD 之前的内容里，第一行是我们自己写进去的日期标题（nextBody 的 `${day}`）。
+  // 不剥掉它会当成批注原样保留，下次合并又被收一次 —— 每采一批就多一行日期。
+  // 真正的批注是「日期行之后」的部分，那些必须留。
+  const orphans = rawOrphans.replace(/^(?:[ \t]*\d{4}-\d{2}-\d{2}[ \t]*\r?\n?)+/, '').trim();
   const outsideParsed = blocksIn(outside);
   const all = [...blocks, ...outsideParsed.blocks];
   const ids = new Map(all.filter(b => b.id).map(b => [b.id, b]));
