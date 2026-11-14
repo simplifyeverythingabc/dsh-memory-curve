@@ -174,14 +174,25 @@ async function withLock(memDir, fn) {
   }
 }
 
+/**
+ * 把一段文本切成「记忆条目」块。
+ *
+ * 同时回传第一个 HEAD 之前的原文（orphans）。AUTO 区里常有人手写的批注、
+ * 分隔线或说明，它们不是条目；以前只 map 出 hits，那段文本在重写时直接蒸发，
+ * 属于静默丢数据。两头的处理不一样：
+ *   · 首个 HEAD 之前  → 完整保留（orphans）
+ *   · 两个 HEAD 之间  → 无法与上一条正文区分，仍随上一条走（已知局限，写在 README）
+ */
 function blocksIn(text) {
   const hits = [...text.matchAll(HEAD)];
-  return hits.map((h, i) => {
+  const orphans = (hits.length ? text.slice(0, hits[0].index) : text).trim();
+  const blocks = hits.map((h, i) => {
     const raw = text.slice(h.index, hits[i + 1]?.index ?? text.length).trimEnd();
     return { raw, id: h[4], who: h[3], time: `${h[1]} ${h[2]}`,
       text: raw.slice(h[0].length).replace(/<!-- memory-source:[0-9a-f]{64} -->\s*/g, '').trim(),
       source: raw.match(/<!-- memory-source:([0-9a-f]{64}) -->/)?.[1] };
   });
+  return { blocks, orphans };
 }
 
 async function mergeDay(memDir, day, messages) {
@@ -193,8 +204,9 @@ async function mergeDay(memDir, day, messages) {
   }
   const body = begin >= 0 ? old.slice(begin + BEGIN.length, end) : '';
   const outside = begin >= 0 ? old.slice(0, begin) + old.slice(end + END.length) : old;
-  const blocks = blocksIn(body);
-  const all = [...blocks, ...blocksIn(outside)];
+  const { blocks, orphans } = blocksIn(body);
+  const outsideParsed = blocksIn(outside);
+  const all = [...blocks, ...outsideParsed.blocks];
   const ids = new Map(all.filter(b => b.id).map(b => [b.id, b]));
   const sources = new Set(all.map(b => b.source).filter(Boolean));
   const roleMatches = (who, role) => role === 'user' ? ['主人', '用户', 'user'].includes(who) : ['小鱼', '助手', 'assistant'].includes(who);
@@ -218,7 +230,9 @@ async function mergeDay(memDir, day, messages) {
   }
   if (!added) return 0;
   blocks.sort((a, b) => a.time.localeCompare(b.time));
-  const nextBody = `\n${day}\n\n${blocks.map(b => b.raw).join('\n\n')}\n`;
+  // orphans 必须回到 AUTO 区开头：那是人手写的批注或分隔线，不属于任何条目，
+  // 但以前会被整段吃掉。放在所有条目之前，和它的原位置一致。
+  const nextBody = `\n${day}\n\n${orphans ? `${orphans}\n\n` : ''}${blocks.map(b => b.raw).join('\n\n')}\n`;
   // Keep the manual prefix and suffix byte-for-byte, including line breaks.
   const next = begin >= 0 ? old.slice(0, begin + BEGIN.length) + nextBody + old.slice(end)
     : old + (old && !old.endsWith('\n') ? '\n' : '') + `${BEGIN}${nextBody}${END}\n`;

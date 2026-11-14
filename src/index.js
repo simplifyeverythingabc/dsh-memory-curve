@@ -630,7 +630,10 @@ export function apply(ctx, config = {}) {
               evInfo = r2;
               ids = ids.concat(r2.ids);
             } else {
-              ids = ids.concat(expandRange(s2));
+              // expandRange 会对真正的区间抛错（内容哈希无法展开），
+              // 这里转成给人看的提示，不让它冒到工具层当异常。
+              try { ids = ids.concat(expandRange(s2)); }
+              catch (e) { return { text: String(e?.message ?? e) }; }
             }
           }
           // 范围内二次过滤：摘要事件头覆盖 28 条时，通常只要其中几条

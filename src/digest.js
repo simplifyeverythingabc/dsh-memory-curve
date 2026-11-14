@@ -160,7 +160,10 @@ export function buildDailies(arg) {
   const { memDir, digestDir, days } = arg || {};
   const selectedDays = days ? new Set(days) : null;
   const entries = readEntries(memDir);
-  if (!entries.length) return { written: [], total: 0 };
+  // 早退分支也要给全字段：memory_curve_build 的 output schema 把 events 声明成
+  // 必填 integer，只返回 { written, total } 会让工具返回 undefined 破坏契约，
+  // 启动日志还会打出「事件 undefined」。
+  if (!entries.length) return { written: [], total: 0, events: 0 };
 
   const events = clusterEvents(entries);
   const graded = gradeEvents(events);
@@ -214,6 +217,7 @@ export function readDigest(arg) {
     throw new TypeError('readDigest 的参数改成了对象形式：readDigest({ digestDir, day })');
   }
   const { digestDir, day } = arg || {};
+  assertDay(day, 'readDigest');
   const p = join(digestDir, `${day}.md`);
   if (!existsSync(p)) return null;
   return readFileSync(p, 'utf8');
@@ -262,6 +266,7 @@ export function grepDay(arg) {
     throw new TypeError('grepDay 的参数改成了对象形式：grepDay({ memDir, day, pattern, maxChars })');
   }
   const { memDir, day, pattern, maxChars = 4000 } = arg || {};
+  assertDay(day, 'grepDay');
   const p = join(memDir, `${day}.md`);
   if (!existsSync(p)) return null;
   const raw = readFileSync(p, 'utf8');
@@ -419,16 +424,44 @@ function digestCited(digestDir) {
 }
 
 /**
+ * 日期参数必须严格是 YYYY-MM-DD。
+ *
+ * 不加这道校验 `readDigest({ day: '../secret' })` 会拼成
+ * `<digestDir>/../secret.md` —— 直接读到记忆目录外的任意文件。工具层把 day
+ * 原样透传，所以校验只能放这里，两条路径（摘要、流水）都要过。
+ */
+function assertDay(day, where) {
+  if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    throw new TypeError(`${where} 的 day 必须是 YYYY-MM-DD，收到 ${JSON.stringify(day)}`);
+  }
+}
+
+/**
  * pattern 语义：默认**字面量**，只有 /.../ 才当正则。
  *
  * 不定死会出事：搜 v2.8 时 `.` 匹配任意字符，v2x8 也算命中 —— 返回了结果，
  * 只是错的，而且很难察觉。宁可默认安全，显式 /.../ 才放开正则。
+ *
+ * 正则这条路要挡灾难性回溯：工具在 agent 主循环里同步跑，`/^(a+)+$/` 对 40
+ * 字符正文能卡住 8 秒以上，等于把整个会话挂死，JS 单线程还没有超时可用。
+ * 所以限长度 + 拒绝嵌套量词，挡不住的极端形状留给下面的正文长度上限兜。
  */
+const REGEX_MAX = 200;
+const NESTED_QUANT = /(\([^()]*[+*][^()]*\)|\[[^\]]*\][+*])[+*]/;
+
 export function makeMatcher(pattern) {
   const s = String(pattern ?? '').trim();
   if (s.length >= 2 && s.startsWith('/') && s.endsWith('/')) {
-    try { return { re: new RegExp(s.slice(1, -1), 'i'), literal: false, src: s }; }
-    catch { /* 正则写错就当字面量 */ }
+    const body = s.slice(1, -1);
+    if (body.length <= REGEX_MAX && !NESTED_QUANT.test(body)) {
+      try { return { re: new RegExp(body, 'i'), literal: false, src: s }; }
+      catch { /* 正则写错就当字面量 */ }
+    } else {
+      // 不静默退化成字面量 —— 那会让调用方以为正则在跑却其实没跑。
+      throw new TypeError(
+        `正则过长或含嵌套量词（容易灾难性回溯）：${s.length > REGEX_MAX ? `长度 ${body.length} > ${REGEX_MAX}` : '匹配到 (x+)+ 一类结构'}`,
+      );
+    }
   }
   const esc = s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return { re: new RegExp(esc, 'i'), literal: true, src: s };
@@ -673,20 +706,22 @@ export function searchAll(arg) {
  * 事件键（`e_YYYYMMDD_NNNN`）**不能**传这里，那种要用 `eventIds()`。
  *
  * @param {string} spec 形如 `"m_20260115_a1b2c3..m_20260120_d4e5f6"`
- * @returns {string[]} 区间内的 id，按出现顺序；格式不对返回空数组
+ * @returns {string[]} 单个 id，或空数组
+ * @throws {TypeError} 传入两端不同的区间 —— 内容哈希无法展开，硬只取首尾会静默丢条目
  */
 export function expandRange(spec) {
   const s = String(spec || '').trim();
   const m = /^(m_\d{8}_[0-9a-f]{6})\.\.(m_\d{8}_[0-9a-f]{6})$/.exec(s);
   if (m) {
     const [, a, b] = m;
-    // 内容哈希 id 不能展开。以前 id 是递增序号，a..b 能推算出中间每一项；
-    // 哈希是随机的，+"d64bb6" 得到 NaN，循环一次都不跑 —— 结果返回空数组，
-    // 表现为「范围内没命中（检查 0 条）」，看起来像没数据，其实是静默失败。
-    //
-    // 只返回两个端点（至少能取到首尾），真正的完整取文请用 event: 键
-    // （摘要里 `覆盖:` 那行在有哈希 id 后已经一律写成 `+N（不连续）`）。
-    return a === b ? [a] : [a, b];
+    if (a === b) return [a];
+    // 以前这里返回 [a, b]，调用方看到「范围内 N 条」就以为拿全了，其实中间全丢。
+    // 内容哈希是随机的，没有「区间内所有 id」这种东西，与其假装能展开，不如报错
+    // 让调用方改用 event 键 —— 那才是能取全量的通道。
+    throw new TypeError(
+      `id 区间无法展开：${a}..${b}。内容哈希是随机的，中间项无从推算；`
+      + '要取一个事件的全部条目，请改用事件键 event:e_YYYYMMDD_HHMM（摘要「覆盖」行里会给）。',
+    );
   }
   const one = /^(m_\d{8}_[0-9a-f]{6})$/.exec(s);
   if (one) return [one[1]];

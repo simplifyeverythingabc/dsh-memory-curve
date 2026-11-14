@@ -1,11 +1,3 @@
-## [0.3.7] - 2026-11-14
-
-### 修复
-
-- 删掉 src/digest.js 里一段悬空的 JSDoc。它描述的是 searchAll，但后面紧跟的是 digestCited，searchAll 真身另有注释；而且那句话说「返回按日期倒序」，实际是先按 score 取 top-N 再按时间**升序**。有价值的部分（为什么需要这条通道、返回顺序怎么定的）并入了真身的 JSDoc。
-- CHANGELOG 里「只补那一天」的措辞写准：uildDailies 的 days 过滤在聚类之后，省的是逐日渲染与写盘，聚类本身仍全量。
-
----
 # Changelog
 
 格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 来，版本号照 [语义化版本](https://semver.org/lang/zh-CN/)。
@@ -17,20 +9,60 @@
   - 现在 coverage 是主信号，正确答案只命中一个词时会被命中两个词的错误答案压过
   - 单独上 IDF 治不了：实测「缓存 失效 排查」，错误答案命中的两个词 IDF 之和仍高于正确答案的唯一命中
   - 需要同时区分「表态」和「实施记录」，否则早期那句"别用缓存了"永远排在真正的排查记录前面
-  - 改的时候别忽略 `STATE_W` 这个偏斜源：`archived` 命中被乘 0.4，而 hist 类查询的正确答案恰恰常是「旧、且从没被查过」的条目，真实数据里大概率已 archived。bench 夹具只有 4 天且全是 active，测不到这个降权
+  - 改之前先给 bench 补 archived 夹具：现有夹具全是 4 天内 active 数据，测不出 `STATE_W` 对 hist 类查询的降权偏斜
+- **cite 改事件级**：摘要只引用事件首尾两条 id，中间条目（往往是答案）永远拿不到那 0.38 的加分
 
 ### 待办
-- 跨平台路径测试（目前只在 Windows 上验证过）
+- 跨平台路径测试（目前只在 Windows 上验证过）；CI 加 Windows runner，UNC 断言至今没在 CI 跑过
 - 摘要生成支持自定义模板
 - 事件聚类支持手动合并 / 拆分
-- 采集：摘要刷新挪出写锁。现在 `createCollector.pass()` 在 `withLock()` 回调里调 `onDirty`，而 `onDirty` 要做全量摘要 + 分级报告；持锁期间跑 `memory-notes.mjs` 会吃 `ELOCKED` 退 1，虽然数据本身没问题
-- 采集：`mergeDay` 重写 AUTO 区时保留未识别行。现在重写内容完全来自 `blocksIn()` 解析出的块，区内的自由文本或格式不完全匹配 HAND 正则的行会在下次合并写入那天时无声消失
-- `verify-ids` 的 `seqOf` 和 `gradeEvents` 都用十进制判断哈希 id 的「连续性」。内容哈希下这个假设不成立，两张随机哈希恰好十进制相邻就会被判连续。应改为一律 `+N` 或走 event 键
-- `memory_curve_raw` 的 ids + pattern 是 O(ids × 文件大小)：`readById` 每个 id 把当天文件完整读一遍。应按天分组单次扫描
-- `digestCited` 每次搜索全量重读所有摘要文件，可加 mtime 指纹缓存（同 `memFingerprint` 思路）
-- 日期行 HEAD 正则散落六处（`events.js` × 1、`digest.js` × 3、`verify-ids.mjs` × 1、`collector.js` × 1），收敛成一个 `parseDayLog()`
-- `renderForPrompt` 里 L2/L3 是 `slice(-N)` 纯取最新，没有 L1 那种时间桶配额。若有意为之应在注释写明，否则统一分桶
-- `access.js` 的模块级缓存永不过期：外部进程或手工改 `_access.json` 后会一直用旧数据，值得加 mtime 校验
+- **手动 pin 通道**：2 条关键结论 S=1.55 落在 L3，28 条灌水 S=6.97 挤进 L1。density 注释说防 burst，公式实际是奖励（封顶 40 → ×1.67）
+- 采集：摘要刷新挪出写锁。现在 `createCollector.pass()` 在 `withLock()` 回调里调 `onDirty`，持锁期间跑 `memory-notes.mjs` 会吃 `ELOCKED`
+- 采集：`mergeDay` 里两个 HEAD 之间的自由文本仍随上一条走（首个 HEAD 之前的已在 0.3.8 保留）
+- **读取路径正文污染**：`readById` / `grepDay` / `searchAll` 不剥 `memory-source` 注释与 AUTO END 标记，每天最后一条正文会混入标记；与 `readEntries` 的干净文本不一致。收敛为单一 `parseDayLog()`
+- **访问计数记错对象**：`ids` 含缺失项时 `pool.slice(0, found)` 把缺失 id 记成「被查过」，真正返回的后一条没记
+- **聚类短间隔分支是纯时间 OR**（注释写「且共享关键词」）：「红烧肉」与「k8s CrashLoopBackOff」隔 10 分钟并成 1 个事件
+- **英文内容被摘要抛弃**：`cleanLine` 丢弃大于 50 字符的纯英文行，英文事件 head/tail 全空
+- **中文无空格查询零命中**：「缓存排查记录」0 命中，「缓存 排查」3 命中；应按 CJK 二元切分后走现有 OR 加权
+- `memory_curve_raw` 的 ids + pattern 是 O(ids × 文件大小)；`digestCited` 每次搜索全量重读摘要目录
+- 日期行 HEAD 正则散落六处，收敛成 `parseDayLog()`
+- `renderForPrompt` 里 L2/L3 是 `slice(-N)` 纯取最新，没有 L1 那种时间桶配额
+- `access.js` 的模块级缓存永不过期，外部改了 `_access.json` 会一直用旧数据
+- 注入文本缺不可信数据边界标记：`interpolate:false` 只防变量解析，防不了语义注入
+- 没有 forget / 墓碑工具：误贴的密钥与隐私无法移除（`access.js` 注释提过 `deleted` 标记，未实现）
+- 小项：`maxHits` / `maxChars` 加上限钳制；`buildDailies` 的 CLI 路径改原子写；`withLock` 对 PID 复用与 EPERM 误判加时间戳上限
+
+---
+
+## [0.3.8] - 2026-11-15
+
+数据安全与正确性修复。六项 P0 来自外部代码评审的实测复现，原本都排在待办里，这次提级随版本修掉。
+
+### 修复
+
+- **日期参数路径穿越**（`src/digest.js`）：`readDigest` / `grepDay` 直接把 `day` 拼进路径，`day: '../secret'` 能读到记忆目录外的任意 `.md` 文件。工具层原样透传，所以校验放在这两处，新增 `assertDay()` 要求严格 `YYYY-MM-DD`。
+- **正则灾难性回溯挂死主循环**（`src/digest.js`）：`/^(a+)+$/` 对 40 字符正文回溯超过 8 秒，而工具在 agent 主循环里同步跑。`makeMatcher` 现在限制 pattern 长度 ≤ 200，并拒绝嵌套量词结构；命中时直接报错而不是静默退化成字面量（那会让调用方以为正则在跑却其实没跑）。
+- **`mergeDay` 静默丢弃 AUTO 区自由文本**（`src/collector.js`）：`blocksIn` 只 map 出条目块，第一个 HEAD 之前的手写批注、分隔线在重写时整段蒸发。现在回传 `orphans` 并放回 AUTO 区开头。两个 HEAD 之间的非条目行仍随上一条走（无法与正文区分），属已知局限，记在待办。
+- **`eventKey` 同分钟碰撞**（`src/events.js`）：同一分钟内多个事件（批量导入、子代理并发）共用一个键，`ids.json` 后写覆盖先写，按事件键取全量会拿到别人的条目。现在撞号时追加 `_2`、`_3`。
+- **范围取文静默丢条目**（`src/events.js` + `src/digest.js`）：内容哈希被误判「十进制连续」时摘要写成 `a..b`，取文只回端点、中间全丢。现在放弃连续性假设——`idRange` 一律写 `+N`，`expandRange` 遇到真区间直接抛错并指引改用 event 键，`index.js` 把它转成给人看的提示。
+- **空目录 `buildDailies` 缺 `events` 字段**（`src/digest.js`）：早退分支返回 `{ written, total }`，`memory_curve_build` 的 output schema 把 `events` 声明为必填 integer，工具返回 `undefined` 破坏契约，启动日志还会打「事件 undefined」。补 `events: 0`。
+
+### 新增
+
+- `tools/check.mjs` 增加 CHANGELOG 结构断言：首行必须是 `# Changelog`、该标题恰好出现一次、第一个版本节必须是 `[Unreleased]`、不得含控制字节（`0x00-0x08`、`0x0B`、`0x0C`、`0x0E-0x1F`，合法空白 TAB/LF 除外）。造红自证：真实坏文件 → exit 1 并报出三项；修好后 → exit 0。
+
+### 变更
+
+- 修正 CHANGELOG 里被写坏的内容：`uildDailies` 前的 `0x08` 退格字节、被 prepend 到文件头的 0.3.7 节。根因是 PowerShell 双引号 here-string 把反引号当转义符（`` `b `` → 退格、`` `t `` → TAB、`` `v `` → VT），此前那三个控制字节出自同一原因。改用 write 类工具直接落盘即可避免。
+
+---
+
+## [0.3.7] - 2026-11-14
+
+### 修复
+
+- 删掉 `src/digest.js` 里一段悬空的 JSDoc。它描述的是 `searchAll`，但后面紧跟的是 `digestCited`，`searchAll` 真身另有注释；而且那句话说「返回按日期倒序」，实际是先按 score 取 top-N 再按时间**升序**。有价值的部分（为什么需要这条通道、返回顺序怎么定的）并入了真身的 JSDoc。
+- CHANGELOG 里「只补那一天」的措辞写准：`buildDailies` 的 days 过滤在聚类之后，省的是逐日渲染与写盘，聚类本身仍全量。
 
 ---
 
@@ -39,7 +71,7 @@
 ### 修复
 
 - `memory_search` 的输出文案改成「取样时按相关度筛过，列表按时间排序」。此前写「按相关度排序」，而实际是先按 score 取 top-N 再按日期时间重排，模型会把当天最早的一条当成最相关的一条 —— 检索信号不能是错的。
-- `memory_curve_day` 在摘要缺失时只补那一天（传 `days: [day]`）。此前不带 `days`，会把**所有**日子的摘要重写一遍。注意 `buildDailies` 的 days 过滤发生在聚类之后，所以聚类本身仍是全量；省的是逐日渲染与写盘，冷路径上够用，真要连聚类一起省得另开一条「只读一天」的路径。
+- `memory_curve_day` 在摘要缺失时只补那一天（传 `days: [day]`）。此前不带 `days`，会把**所有**日子的摘要重写一遍。注意 `buildDailies` 的 days 过滤发生在聚类之后，所以聚类本身仍是全量；省的是逐日渲染与写盘，冷路径上够用。
 - `src/digest.js` 里复述归组的注释改成符合实现的说法。key 是 `headKey(s, 120) + '@' + s.b.day`，所以跨天的永远不落进同一组，只有**同一天**内前 120 字相同的才合并。原注释说的正好相反。
 
 ### 新增
@@ -94,7 +126,7 @@
 ### 变更
 
 - 索引主题短语在标点或空格处断句并补省略号，不再硬切在第 20 个字符中间。
-- 摘要里的不连续范围标注为「共 N 条，id 不相邻，按 event 键取全量」，保留 `+N` 供校验器解析。
+- 摘要里的不连续范围标注为「共 N 条，按 event 键取全量」，保留 `+N` 供校验器解析。
 - `memory_curve_show` 正文和列表截断时标注已截断及原始长度。
 
 ---
@@ -235,3 +267,4 @@
 | 写入时把 1245 条砍到 490 条 | 去重用「前 120 字」当判据，开头相同的消息被误删 | 改成全文哈希 |
 | 标记越积越多（14 个 BEGIN / 8 个 END） | 消息正文里贴过 `<!-- dsh-note:auto-begin -->` 代码，写进文件后被下次剥除误吞 | 写入时过滤正文里的标记行 |
 | `{{memory_curve}}` 原样出现在系统提示里 | 某些改写插件把非白名单变量拆成 `{ {x}}` | 走 `systemPrompt.context()`，并设 `interpolate: false` |
+| CHANGELOG 里出现「uildDailies」这种像拼写错误的东西 | PowerShell 双引号 here-string 把反引号当转义符，`` `b `` 变成退格字节 | 改用 write 类工具直接落盘；check.mjs 加控制字节断言 |

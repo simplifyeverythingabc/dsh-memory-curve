@@ -201,6 +201,8 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
   const df = new Map();
   for (const ev of events) for (const t of ev.toks) df.set(t, (df.get(t) || 0) + 1);
   const N = Math.max(events.length, 1);
+  // eventKey 的撞号计数：同一分钟内出现多个事件时靠它加序号。
+  const keyUse = new Map();
 
   const graded = events.map((ev, idx) => {
     const n = ev.items.length;
@@ -232,27 +234,22 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
     const tail = lastLine(ev.texts).slice(0, 90);
 
     const ids = ev.ids || [];
-    // 只有「同一天 + 序号连续」才能用 a..b 表示。
-    // 事件是按时间邻近聚的，可能跨天，硬拼首尾会得到 000289..000044 这种
-    // 起止反了的范围（verify 的条数核对就是靠这个抓出来的）。
-    const contiguous = (() => {
-      if (ids.length <= 1) return ids.length === 1;
-      const parse = (id) => /^m_(\d{8})_([0-9a-f]{6})$/.exec(id);
-      const p0 = parse(ids[0]);
-      if (!p0) return false;
-      for (let i = 1; i < ids.length; i++) {
-        const pi = parse(ids[i]);
-        if (!pi || pi[1] !== p0[1]) return false;              // 跨天
-        if (+pi[2] !== +parse(ids[i - 1])[2] + 1) return false; // 不连续
-      }
-      return true;
-    })();
+    // 内容哈希 id 没有「连续」这个概念：hash 是随机的，两张哈希恰好十进制相邻
+    // 只是巧合（如 000101 与 000102），据此写成 a..b 会让人以为中间那些也属于
+    // 这个事件，而取文时只拿得到首尾两条 —— 静默丢条目。所以一律不声明连续，
+    // 摘要只写 +N，取全量走 event 键。
+    const contiguous = ids.length === 1;
     const idRange = !ids.length ? ''
-      : (ids.length === 1 || contiguous) ? `${ids[0]}..${ids[ids.length - 1]}`.replace(/^(m_\d{8}_[0-9a-f]{6})\.\.\1$/, '$1')
-      : `${ids[0]} +${ids.length - 1}（共 ${ids.length} 条，id 不相邻，按 event 键取全量）`;
+      : contiguous ? ids[0]
+      : `${ids[0]} +${ids.length - 1}（共 ${ids.length} 条，按 event 键取全量）`;
     // 稳定的机器可读键：日期 + 事件起始时分。摘要写它，raw 用它取精确 ID 数组。
+    // 同一分钟内可能出现多个事件（批量导入、子代理并发），键会撞；撞了就加序号，
+    // 否则 ids.json 后写覆盖先写，按事件键取全量会拿到别人的条目。
     const sd = new Date(ev.startAt);
-    const eventKey = `e_${dayOf(ev.startAt).replace(/-/g, '')}_${String(sd.getHours()).padStart(2, '0')}${String(sd.getMinutes()).padStart(2, '0')}`;
+    const baseKey = `e_${dayOf(ev.startAt).replace(/-/g, '')}_${String(sd.getHours()).padStart(2, '0')}${String(sd.getMinutes()).padStart(2, '0')}`;
+    const seen = keyUse.get(baseKey) || 0;
+    keyUse.set(baseKey, seen + 1);
+    const eventKey = seen === 0 ? baseKey : `${baseKey}_${seen + 1}`;
     return {
       idx, day: ev.day, startAt: ev.startAt, lastAt: ev.lastAt, eventKey,
       ids, idRange, idsContiguous: contiguous,
