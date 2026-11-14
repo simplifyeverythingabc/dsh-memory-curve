@@ -705,9 +705,22 @@ export function searchAll(arg) {
 
   const hits = [];
   for (const s of picked) {
-    const { re } = makeMatcher(use[0]);
-    const at = s.text.search(re);
-    const from = Math.max((at < 0 ? 0 : at) - win, 0);
+    // 片段要围绕**实际命中的那个词**定位，不是固定用 use[0]。
+    //
+    // 以前固定用首词：多词查询里如果首词没出现、第二个词命中了（OR 加权允许这样），
+    // search() 返回 -1、from 归 0，片段就从正文开头截 —— 用户搜「nacos 本地 yml」，
+    // 返回的第一条里连 nacos 都看不见。实测 78 条命中里有 23 条是这种。
+    let re = makeMatcher(use[0]).re;
+    let at = s.text.search(re);
+    if (at < 0) {
+      for (const w of use) {
+        const r = makeMatcher(w).re;
+        const p = s.text.search(r);
+        if (p >= 0) { re = r; at = p; break; }
+      }
+      if (at < 0) at = 0;          // 一个词都没实际命中（例如只在摘要里引用了）就从开头截
+    }
+    const from = Math.max(at - win, 0);
     const snippet = s.text.slice(from, from + win * 2).replace(/\s+/g, ' ').trim();
     hits.push({ id: s.b.id, ids: [s.b.id], day: s.b.day, time: s.b.time, snippet, merged: 0, score: +s.score.toFixed(3) });
   }

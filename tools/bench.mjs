@@ -196,15 +196,36 @@ for (const r of rows) {
   );
 }
 
-// 精确率
-let prec = 0, precN = 0;
+// 精确率 —— 两个口径都报
+//
+// 首词命中：老口径，只看查询的首个词在不在片段里。
+//   它有个结构性偏差：多词查询里首词本来就可能不在这条命中的正文中（OR 加权允许
+//   只命中第二个词），这种「返回了相关结果但首词没出现」会被算成失败。
+// 任一词命中：真正要保证的东西 —— 返回的片段跟查询相关。检索质量应该看这个。
+let firstHit = 0, anyHit = 0, precN = 0;
+const showMiss = process.argv.includes('--show-miss');
+const misses = [];
 for (const c of CASES) {
   if (c.expectZero) continue;
   const r = searchAll({ memDir, pattern: c.q, maxHits: 10 });
-  const { re } = makeMatcher(c.q.split(/\s+/)[0]);
-  for (const h of r.hits) { precN++; if (re.test(h.snippet)) prec++; }
+  const terms = c.q.split(/\s+/).filter(Boolean);
+  const reFirst = makeMatcher(terms[0]).re;
+  const res = terms.map((t) => makeMatcher(t).re);
+  for (const h of r.hits) {
+    precN++;
+    const sn = String(h.snippet || '');
+    if (reFirst.test(sn)) firstHit++;
+    if (res.some((re) => re.test(sn))) anyHit++;
+    else if (showMiss) misses.push({ q: c.q, id: h.id || h.b?.id, snippet: sn.slice(0, 90) });
+  }
 }
-console.log(`\n精确率（首词出现在片段里）：${prec}/${precN} = ${(prec / Math.max(precN, 1) * 100).toFixed(1)}%`);
+const pct = (a, b) => `${a}/${b} = ${(a / Math.max(b, 1) * 100).toFixed(1)}%`;
+console.log(`\n精确率（首词在片段里）：${pct(firstHit, precN)}`);
+console.log(`精确率（任一词在片段里）：${pct(anyHit, precN)}`);
+if (showMiss && misses.length) {
+  console.log(`\n任一词也没露出来的 ${misses.length} 条：`);
+  for (const m of misses) console.log(`  [${m.q}]  ${m.id || ''}  ${m.snippet.replace(/\s+/g, ' ')}`);
+}
 
 try { rmSync(dir, { recursive: true, force: true }); } catch { /* 清理失败不影响结果 */ }
 process.exitCode = fail ? 1 : 0;
