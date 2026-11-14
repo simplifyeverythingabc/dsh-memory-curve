@@ -45,6 +45,49 @@ export const inject = ['systemPrompt', 'tools'];
  *
  * 值和 web-search 等现有插件一致：静态 import schemastery（它是 profile 的
  * 依赖，能正常解析）+ z.object(...)。
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * 关于 token：这个插件每步都在花 token，装之前先看清这一节。
+ *
+ * DSH 每次调用模型都会重新组装系统提示。插件注册的 memory-curve-index 属于
+ * runtime context，于是**每一个 step 都会带一份记忆索引**。一个 step 指一次
+ * 模型调用——你发一句话算一个 step；我调一次工具、再回来继续，又是一个 step。
+ * 所以同一轮对话里连着改八个文件，就是八份索引。
+ *
+ * 默认配置下一次注入约 2785 字符（实测，145 事件 / 2825 条流水），折合
+ * 1500–2000 token，具体看各家的分词。数据越多越长，因为「最近几天」和
+ * 「更早按 S 补位」是按事件条数截断的，不是按字符截断。
+ *
+ * 三档可调，改 profile 的 cordis.patch.yml，不要改这里的默认值：
+ *
+ *   档位一 · 默认，信息最全
+ *     （什么都不用写，就用下面的 defaults）
+ *
+ *   档位二 · 精简，约省一半
+ *     maxL1: 6
+ *     maxL2: 10
+ *     maxL3: 0
+ *
+ *   档位三 · 完全关闭注入，token 归零
+ *     injectContext: false
+ *     六个 memory_curve_* 工具照常可用，需要查记忆时现查。代价是模型不会
+ *     自动知道有哪些记忆，得靠对话里提一句、或者主动去翻。
+ *
+ * 写进 patch 的样子：
+ *
+ *   - id: memory-curve
+ *     name: dsh-memory-curve
+ *     config:
+ *       injectContext: false
+ *
+ * 另外三条和 token 有关的实情：
+ *   · 注入的文本内容变了才会重算；插件内部有 3 秒短周期缓存，连续几次工具
+ *     调用不会重复计算（实测 27ms → 0.001ms）。但这只省 CPU，不省 token，
+ *     因为快照本身就每步生成一份。
+ *   · 日志里那行「上下文注入 · runtime-context」是宿主 agent-loop 每步打
+ *     的运行时快照，不是本插件单独触发，记忆索引只是拼在里面的一段。
+ *   · maxL4 / maxL5 不存在，L4、L5 从来不注入，只存磁盘。
+ * ─────────────────────────────────────────────────────────────────────
  */
 export const Config = z.object({
   disabled: z
@@ -59,6 +102,10 @@ export const Config = z.object({
     )
     .volatile(),
   maxL1: z.number().min(0).max(200).default(12).description('L1 事件最多列几条，控制注入体积。'),
+  injectContext: z
+    .boolean()
+    .default(true)
+    .description('是否把记忆索引注入系统提示。设 false 后索引不再占每步 token，六个 memory_curve_* 工具照常可用，按需现查。'),
   maxL2: z.number().min(0).max(200).default(20).description('L2 事件最多列几条。'),
   maxL3: z.number().min(0).max(200).default(8).description('L3 事件最多列几条。'),
   autoCollect: z.boolean().default(false).description('启用会话消息自动采集、启动补漏和摘要刷新；只保存用户与助手正文。'),
@@ -386,6 +433,10 @@ export function apply(ctx, config = {}) {
   // 正好做到「每步重新读盘」。
   ctx.effect(() => {
     const prompt = ctx.systemPrompt;
+    if (config.injectContext === false) {
+      console.log('[memory-curve] injectContext=false，索引不注入；六个工具照常可用');
+      return () => {};
+    }
     if (typeof prompt?.context !== 'function') {
       console.warn('[memory-curve] 没有 systemPrompt.context，索引这一轮不注入');
       return () => {};

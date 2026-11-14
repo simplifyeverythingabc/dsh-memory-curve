@@ -216,6 +216,39 @@ Bundle 默认打开自动采集。插件监听 DSH 的 `session/event`，只收�
 
 已有有效流水的用户可以跳过第 2 步。会话目录不存在时采集器会提示后以退出码 0 结束，此时只是没有产生流水。
 
+### token 开销与三档调节
+
+这个插件每步都在花 token，装之前先看清这一节。
+
+DSH 每次调用模型都会重新组装系统提示，记忆索引属于 runtime context，于是**每一个 step 都会带一份**。一个 step 指一次模型调用：你发一句话算一个 step；调一次工具、再回来继续，又是一个 step。同一轮里连着改八个文件，就是八份索引。
+
+默认配置下一次注入约 2785 字符（145 事件 / 2825 条流水的实测值），折合 1500–2000 token，具体取决于各家分词。数据越多越长，因为「最近几天」和「更早按 S 补位」按事件条数截断，不是按字符截断。
+
+三档，改 profile 的 `cordis.patch.yml`：
+
+| 档位 | 配置 | 每步开销 | 代价 |
+|---|---|---|---|
+| 默认 | 什么都不写 | 约 2000 token | 无 |
+| 精简 | `maxL1: 6`　`maxL2: 10`　`maxL3: 0` | 约一半 | 高留存事件只列前几条 |
+| 关闭 | `injectContext: false` | 0 | 不再自动感知记忆，需现查 |
+
+关闭档的写法和效果：
+
+```yaml
+- id: memory-curve
+  name: dsh-memory-curve
+  config:
+    injectContext: false
+```
+
+六个 `memory_curve_*` 工具照常可用，需要查记忆时现查。代价是模型不会自动知道有哪些记忆，得靠对话里提一句、或者主动去翻。
+
+还有三条实情：
+
+- 注入文本变了才会重算；插件内部有 3 秒短周期缓存，连续几次工具调用不重复计算（实测 27ms → 0.001ms）。这只省 CPU，不省 token，快照本身每步生成一份。
+- 日志里那行 `上下文注入 · runtime-context` 是宿主 agent-loop 每步打的运行时快照，不是本插件单独触发，记忆索引只是拼在里面的一段。旁边那条 `time-context` 来自宿主的 time-context 插件。
+- `maxL4` / `maxL5` 不存在。L4、L5 从来不注入，只存磁盘。
+
 ### 内存目录怎么定
 
 `tools/memory-notes.mjs`、`tools/build-dailies.mjs`、`tools/verify-ids.mjs` 和插件都调用 `src/paths.js` 的同一个 `resolveMemDir()`：
