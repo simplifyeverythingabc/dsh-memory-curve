@@ -152,6 +152,22 @@ const MAX_L1 = 12, MAX_L2 = 20, MAX_L3 = 8, INDEX_DAYS = 10;
 const PAD = (n) => String(n).padStart(2, '0');
 const dayOf = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${PAD(d.getMonth() + 1)}-${PAD(d.getDate())}`; };
 
+// 报告与工具输出统一用本地时间。toISOString() 是 UTC：流水按本地日分桶、event 键按本地时分，
+// 两者混用会让凌晨 0–8 点的事件在报告里显示成前一天，整体差一个时区。
+const fmtMD = (ms) => { const d = new Date(ms); return `${PAD(d.getMonth() + 1)}-${PAD(d.getDate())} ${PAD(d.getHours())}:${PAD(d.getMinutes())}`; };
+const fmtYMD = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${PAD(d.getMonth() + 1)}-${PAD(d.getDate())} ${PAD(d.getHours())}:${PAD(d.getMinutes())}`; };
+
+/** 索引里的主题短语：够长就在标点或空格处断，补省略号，别切在半句中间。 */
+function clipTopic(s, max = 20) {
+  const t = String(s || '').replace(/[\s`*#|]+/g, ' ').trim();
+  if (!t) return '—';
+  if (t.length <= max) return t;
+  const win = t.slice(0, max);
+  const m = win.match(/^(.*[，。；、,.;:：！？!?\s])[^，。；、,.;:：！？!?\s]*$/);
+  const cut = m && m[1].trim().length >= 8 ? m[1].trim() : win;
+  return cut.replace(/[，。；、,.;:：！？!?]+$/, '') + '…';
+}
+
 /**
  * 流水目录的「指纹」：文件名 + 大小 + mtime。
  *
@@ -206,7 +222,7 @@ function build(now = Date.now()) {
 
 function report(graded) {
   const L = ['# 事件分级（遗忘曲线）', '',
-    `> 生成 ${new Date().toISOString().slice(0, 16).replace('T', ' ')}　事件 ${graded.length} 个`, '',
+    `> 生成 ${fmtYMD(Date.now())}　事件 ${graded.length} 个`, '',
     '> `S = ln(1+条数)×(1+0.35·ln(1+跨度天数))×(1+密度/60)`　`R = exp(−距今小时÷(S×24))`', '',
     '| 等级 | 事件数 |', '|---|---|'];
   const c = {};
@@ -218,7 +234,7 @@ function report(graded) {
     L.push('', `## ${LEVEL_NAME[lv]}（${list.length}）`, '',
       '| # | 开始 | 条数 | 跨度 | 密度 | S | R | 查过 | 状态 | 首句 |', '|---|---|---|---|---|---|---|---|---|---|');
     for (const g of list) {
-      const t = new Date(g.startAt).toISOString().slice(5, 16).replace('T', ' ');
+      const t = fmtMD(g.startAt);
       const head = (g.head || '').replace(/[|`*#]/g, '').slice(0, 60);
       const st = STATE_LABEL[g.state] || g.state || '-';
       L.push(`| ${g.idx} | ${t} | ${g.count} | ${g.spanDays}天 | ${g.density} | ${g.S} | ${g.R} | ${g.accessCount || 0}次 | ${st} | ${head} |`);
@@ -243,7 +259,7 @@ function dayIndex(graded) {
     // 主题词对中文天天是碎片（「拟宿」「的页」），索引行改用当天首个事件的首句，
     // 一句话就能认出那天在干什么。
     const first = list.slice().sort((a, b) => a.startAt - b.startAt)[0];
-    const tops = (first?.head || '').replace(/[\s`*#|]/g, ' ').trim().slice(0, 20) || '—';
+    const tops = clipTopic(first?.head);
     const lv = ['L1', 'L2', 'L3'].filter((k) => c[k]).map((k) => `${k}×${c[k]}`).join(' ') || '—';
     return `- ${day}　${n}条 ${list.length}事件 ${lv}　${tops}`;
   }).join('\n');
@@ -632,18 +648,21 @@ export function apply(ctx, config = {}) {
         if (typeof args?.index === 'number') {
           const g = graded.find((x) => x.idx === args.index);
           if (!g) return { text: `没有第 ${args.index} 号事件（共 ${graded.length} 个，序号 0..${graded.length - 1}）` };
-          const body = (g.texts || []).join('\n\n').slice(0, maxChars);
+          const full = (g.texts || []).join('\n\n');
+          const body = full.length > maxChars
+            ? full.slice(0, maxChars) + `\n…（已截断，全文 ${full.length} 字符；加大 maxChars 取全文）`
+            : full;
           return { text: `# 事件 ${g.idx}　${LEVEL_NAME[g.level]}　S=${g.S} R=${g.R}　${g.count}条\n\n${body}` };
         }
         const pool = args?.level ? graded.filter((g) => g.level === args.level) : graded;
         const L = [`# 事件列表（${pool.length} 个）`, ''];
         let used = 0;
         for (const g of pool) {
-          const t = new Date(g.startAt).toISOString().slice(5, 16).replace('T', ' ');
+          const t = fmtMD(g.startAt);
           const st = STATE_LABEL[g.state] || '-';
           const acc = g.accessCount ? ` 查${g.accessCount}` : '';
           const line = `- #${g.idx} [${g.level}/${st}] ${t} ${g.count}条 R=${g.R}${acc}　${(g.head || '').slice(0, 46)}`;
-          if (used + line.length > maxChars) { L.push('（后面还有，缩小 level 或加大 maxChars）'); break; }
+          if (used + line.length > maxChars) { L.push(`（已显示 ${L.length - 2} / ${pool.length} 条，后面还有；缩小 level 或加大 maxChars）`); break; }
           L.push(line); used += line.length;
         }
         return { text: L.join('\n') };

@@ -249,7 +249,7 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
     })();
     const idRange = !ids.length ? ''
       : (ids.length === 1 || contiguous) ? `${ids[0]}..${ids[ids.length - 1]}`.replace(/^(m_\d{8}_[0-9a-f]{6})\.\.\1$/, '$1')
-      : `${ids[0]} +${ids.length - 1}（不连续）`;
+      : `${ids[0]} +${ids.length - 1}（共 ${ids.length} 条，id 不相邻，按 event 键取全量）`;
     // 稳定的机器可读键：日期 + 事件起始时分。摘要写它，raw 用它取精确 ID 数组。
     const sd = new Date(ev.startAt);
     const eventKey = `e_${dayOf(ev.startAt).replace(/-/g, '')}_${String(sd.getHours()).padStart(2, '0')}${String(sd.getMinutes()).padStart(2, '0')}`;

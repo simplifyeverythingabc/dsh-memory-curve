@@ -294,9 +294,17 @@ export function grepDay(arg) {
   }
   const out = [];
   let used = 0;
-  for (const b of hits) {
+  for (let i = 0; i < hits.length; i++) {
+    const b = hits[i];
     const txt = b.head + '\n' + b.body.join('\n').trim();
-    if (used + txt.length > maxChars) { out.push(`\n（还有 ${hits.length - out.length} 条未显示，缩小 pattern 或加大 maxChars）`); break; }
+    if (used + txt.length > maxChars) {
+      // 单条就超预算时退化为截断输出：只报「还有 N 条」而不给正文，
+      // 调用方看到「命中 1 条」却读不到任何内容，等于白查。
+      const room = maxChars - used;
+      if (room >= 160) out.push(txt.slice(0, room) + `\n…（此条 ${txt.length} 字符，已截断；加大 maxChars 取全文）`);
+      else out.push(`（命中 ${hits.length} 条，剩余 ${hits.length - i} 条超出 maxChars=${maxChars}；加大 maxChars 取值）`);
+      break;
+    }
     out.push(txt);
     used += txt.length;
   }
