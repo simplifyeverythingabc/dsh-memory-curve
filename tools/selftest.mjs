@@ -183,6 +183,25 @@ try {
     } catch (e) {
       fail('injectContext:false 拦截', `apply 抛错：${e?.message ?? e}`);
     }
+
+    // 上面那组探针同时给了 context 和 variable —— 兼容通道第一句
+    // `typeof prompt?.context === 'function'` 就返回了，永远走不到 injectContext 守卫。
+    // 所以它只证明主通道有效。要防「兼容通道守门被删」这个回归，必须再来一组
+    // 只给 variable 的探针；实测删掉守卫时只有这一组会红。
+    const seenVar = [];
+    const probeVarOnly = {
+      systemPrompt: { variable(nm) { seenVar.push(`variable:${nm}`); return () => {}; } },
+      tools: { register() { return () => {}; } },
+      effect(fn) { const d = fn(); return typeof d === 'function' ? d : () => {}; },
+      on() { return () => {}; },
+    };
+    try {
+      mod.apply(probeVarOnly, { injectContext: false });
+      if (seenVar.length) fail('injectContext:false 拦截（仅 variable）', `仍注册了 ${seenVar.join(', ')}`);
+      else ok('injectContext:false 拦截（仅 variable）', 'variable 通道也不注册');
+    } catch (e) {
+      fail('injectContext:false 拦截（仅 variable）', `apply 抛错：${e?.message ?? e}`);
+    }
   }
 
   // ── 假宿主：照真宿主的校验规则

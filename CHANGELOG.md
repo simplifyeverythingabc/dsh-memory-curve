@@ -1,18 +1,3 @@
-## [0.3.5] - 2026-11-14
-
-### 修复
-
-- 兼容通道（prompt.variable）补上 injectContext 守卫。此前在「只有 variable 没有 context」的 profile 上，injectContext: false 照样注册变量，日志却打印「索引不注入」。
-- erify-ids 的 AUTO 标记计数改为行首锚定并校验 <!-- 前缀，撤掉假红（真实数据从 exit 1 转为 exit 0）。
-- 采集状态行的「最近落盘」改用本地时间，不再裸拼 	oISOString()。
-- onDirty 落盘后立即作废 ead() 的 3 秒缓存，索引不再显示旧条数。
-
-### 新增
-
-- selftest 增加 injectContext: false 的行为断言（context 与 variable 两条通道一起断），检查项 28 → 29。
-- cordis.patch.yml 的通道说明与版本注释同步到当前实现。
-
----
 # Changelog
 
 格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 来，版本号照 [语义化版本](https://semver.org/lang/zh-CN/)。
@@ -24,11 +9,50 @@
   - 现在 coverage 是主信号，正确答案只命中一个词时会被命中两个词的错误答案压过
   - 单独上 IDF 治不了：实测「缓存 失效 排查」，错误答案命中的两个词 IDF 之和仍高于正确答案的唯一命中
   - 需要同时区分「表态」和「实施记录」，否则早期那句"别用缓存了"永远排在真正的排查记录前面
+  - 改的时候别忽略 `STATE_W` 这个偏斜源：`archived` 命中被乘 0.4，而 hist 类查询的正确答案恰恰常是「旧、且从没被查过」的条目，真实数据里大概率已 archived。bench 夹具只有 4 天且全是 active，测不到这个降权
 
 ### 待办
 - 跨平台路径测试（目前只在 Windows 上验证过）
 - 摘要生成支持自定义模板
 - 事件聚类支持手动合并 / 拆分
+- 采集：摘要刷新挪出写锁。现在 `createCollector.pass()` 在 `withLock()` 回调里调 `onDirty`，而 `onDirty` 要做全量摘要 + 分级报告；持锁期间跑 `memory-notes.mjs` 会吃 `ELOCKED` 退 1，虽然数据本身没问题
+- 采集：`mergeDay` 重写 AUTO 区时保留未识别行。现在重写内容完全来自 `blocksIn()` 解析出的块，区内的自由文本或格式不完全匹配 HAND 正则的行会在下次合并写入那天时无声消失
+- `verify-ids` 的 `seqOf` 和 `gradeEvents` 都用十进制判断哈希 id 的「连续性」。内容哈希下这个假设不成立，两张随机哈希恰好十进制相邻就会被判连续。应改为一律 `+N` 或走 event 键
+- `memory_curve_raw` 的 ids + pattern 是 O(ids × 文件大小)：`readById` 每个 id 把当天文件完整读一遍。应按天分组单次扫描
+- `digestCited` 每次搜索全量重读所有摘要文件，可加 mtime 指纹缓存（同 `memFingerprint` 思路）
+- 日期行 HEAD 正则散落六处（`events.js` × 1、`digest.js` × 3、`verify-ids.mjs` × 1、`collector.js` × 1），收敛成一个 `parseDayLog()`
+- `renderForPrompt` 里 L2/L3 是 `slice(-N)` 纯取最新，没有 L1 那种时间桶配额。若有意为之应在注释写明，否则统一分桶
+- `access.js` 的模块级缓存永不过期：外部进程或手工改 `_access.json` 后会一直用旧数据，值得加 mtime 校验
+
+---
+
+## [0.3.6] - 2026-11-14
+
+### 修复
+
+- `memory_search` 的输出文案改成「取样时按相关度筛过，列表按时间排序」。此前写「按相关度排序」，而实际是先按 score 取 top-N 再按日期时间重排，模型会把当天最早的一条当成最相关的一条 —— 检索信号不能是错的。
+- `memory_curve_day` 在摘要缺失时只补那一天（传 `days: [day]`）。此前不带 `days`，会把**所有**日子的摘要重算一遍，查一个不存在的日期就白烧一次全量聚类加全量写盘。
+- `src/digest.js` 里复述归组的注释改成符合实现的说法。key 是 `headKey(s, 120) + '@' + s.b.day`，所以跨天的永远不落进同一组，只有**同一天**内前 120 字相同的才合并。原注释说的正好相反。
+
+### 新增
+
+- `selftest` 加一组只给 `variable` 的探针。原先那组探针同时提供了 `context` 和 `variable`，`variable` 那条在第一句 `typeof prompt?.context === 'function'` 就返回，永远走不到 `injectContext` 守卫 —— 守卫被删掉也不会变红，防不住它要防的回归。新增后检查项 29 → 30。
+
+---
+
+## [0.3.5] - 2026-11-14
+
+### 修复
+
+- 兼容通道（`prompt.variable`）补上 `injectContext` 守卫。此前在「只有 variable 没有 context」的 profile 上，`injectContext: false` 照样注册变量，日志却打印「索引不注入」，配置说了假话。
+- `verify-ids` 的 AUTO 标记计数改为行首锚定并校验 `<!--` 前缀，撤掉假红（真实数据从 exit 1 转为 exit 0）。此前不锚定，正文里被转义过的同名标记会被算成额外的 END，而且随每次讨论复发。
+- 采集状态行的「最近落盘」改用本地时间，不再裸拼 `toISOString()`。
+- `onDirty` 落盘后立即作废 `read()` 的 3 秒缓存，索引不再显示旧条数。
+
+### 新增
+
+- `selftest` 增加 `injectContext: false` 的行为断言，检查项 28 → 29。
+- `cordis.patch.yml` 的通道说明与版本注释同步到当前实现。
 
 ---
 
@@ -40,33 +64,13 @@
 - `src/index.js` 的 Config 上方补一整段 token 说明：每步注入的原因、默认 2785 字符折合 1500–2000 token 的实测值、三档调节写法。
 - README 增加「token 开销与三档调节」章节。
 
-### 修复
-
-- 兼容通道（`prompt.variable`）补上 `injectContext` 守卫。此前在「只有 variable 没有 context」的 profile 上，`injectContext: false` 照样注册变量，日志却打印「索引不注入」，配置说了假话。
-
 ---
 
 ## [0.3.3] - 2026-11-14
 
 ### 新增
 
-- 索引注入的短周期复用（3 秒）。连续几次工具调用不再重复重算，实测单次 27ms 降到 0.001ms。
-- `tools/selftest.mjs` 的 Config 必填字段加入 `injectContext`。
-
----
-
-## [0.3.2] - 2026-11-14
-
-### 修复
-
-- `tools/verify-ids.mjs` 的 AUTO 标记计数改为行首锚定并校验 `<!--` 前缀。此前不锚定，正文里被转义过的同名标记会被算成额外的 END，导致 `verify` 假红并随每次讨论复发。
-- `src/index.js` 分级报告、事件表格和 `memory_curve_show` 改用本地时间渲染，修正与本地日分桶流水的时区错位。
-- `digest.js` 的 `grepDay` 在单条命中超出 `maxChars` 时退化为截断输出正文。
-- 索引主题短语在标点处断句并补省略号；`show` 正文和列表截断时标注原始长度。
-
-### 变更
-
-- 摘要里的不连续范围标注为「共 N 条，id 不相邻，按 event 键取全量」，保留 `+N` 供校验器解析。
+- 索引注入的短周期复用（3 秒）。连续几次工具调用不再重复重算，实测单次 27ms 降到 0.001ms。只省 CPU 不省 token —— 快照本身每步生成一份。
 
 ---
 
@@ -117,7 +121,7 @@
 - `src/paths.js` 统一插件、采集、摘要和校验脚本的记忆目录解析。
 - `disabled` 配置字段：设为 `true` 时跳过工具和上下文注册。
 - `tools/check.mjs` 扫描全部源码并断言必需文件存在。
-- CI 加入接口自检（当前 Windows 28 项、Linux 27 项）和校验器的「会红也会绿」自证。
+- CI 加入接口自检（当时 Windows 28 项、Linux 27 项）和校验器的「会红也会绿」自证。
 - `verify:strict` 脚本，把启发式数据异常升级为失败。
 
 ### 修复
@@ -167,6 +171,7 @@
 - 检索精确率 70.5%：返回的前十条里约三成片段跟查询词不完全对得上。这是加权 OR 的固有代价，改法见 Unreleased。
 
 ---
+
 ## [0.1.0] - 2026-11-11
 
 第一个能用的版本。

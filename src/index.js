@@ -544,7 +544,7 @@ export function apply(ctx, config = {}) {
           ? `\n注意：原词无结果，已放宽到「${r.usedTerms.join(' ')}」（降 ${r.relaxed} 级）。`
           : '';
         return {
-          text: `# 「${pat}」命中 ${r.total} 条（按相关度排序，显示 ${r.hits.length}）${warn}\n\n` +
+          text: `# 「${pat}」命中 ${r.total} 条（取样时按相关度筛过，列表按时间排序，显示 ${r.hits.length}）${warn}\n\n` +
                 lines.join('\n') +
                 (r.total > r.hits.length ? `\n\n（还有 ${r.total - r.hits.length} 条，加词缩小或加大 maxHits）` : '') +
                 `\n\n取全文用 memory_curve_raw(id 或 ids)。`,
@@ -571,8 +571,9 @@ export function apply(ctx, config = {}) {
         if (!day) return { text: '要给个日期，例如 2026-11-09' };
         const t = readDigest({ digestDir: digestDir(), day });
         if (t) return { text: t };
-        // 摘要没生成过就现做一次
-        try { buildDailies({ memDir: memDir(), digestDir: digestDir() }); } catch {}
+        // 摘要没生成过就现做 —— 只补这一天。不传 days 会把全部日子的摘要
+        // 重算一遍（全量聚类 + 全量写盘），查一个不存在的日期就白烧一次。
+        try { buildDailies({ memDir: memDir(), digestDir: digestDir(), days: [day] }); } catch {}
         const t2 = readDigest({ digestDir: digestDir(), day });
         return { text: t2 || `没有 ${day} 的摘要。可用 memory_curve_days 看有哪些天。` };
       },

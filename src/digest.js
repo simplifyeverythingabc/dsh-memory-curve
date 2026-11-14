@@ -604,8 +604,10 @@ export function searchAll(arg) {
 
   const groups = new Map();
   for (const s of scored.slice(0, maxHits * 4)) {
-    // 同一天内的相似句是连续记录（「游戏进入主城」连说三遍），不是复述。
-    // 复述的典型形态是「今天重复昨天说过的话」，所以只有跨天才归组。
+    // 注意 key 里带了 s.b.day：跨天的永远不会落进同一组，**只有同一天**内前 120 字
+    // 完全相同的才会合并。collector 层刻意保留「同一句话说两遍」两条原文，这里是
+    // 展示层的取舍 —— 同天重复说明是在反复念叨同一件事，收成一条读起来更清楚；
+    // 跨天重复则往往代表「今天又提了一次」，那是有意义的信号，所以不合并。
     const k = headKey(s, 120) + '@' + s.b.day;
     const g = groups.get(k);
     if (!g) { groups.set(k, s); continue; }
