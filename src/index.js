@@ -331,14 +331,21 @@ export function apply(ctx, config = {}) {
     }, 'memory-curve.collector');
   }
 
+  const READ_TTL = 3000;
+  let readCache = { at: 0, text: '' };
   const read = () => {
+    // 短周期复用：DSH 每一步都会重新组装系统提示，一次修复里连续几次工具调用
+    // 会各自触发一次完整重算（指纹 + 145 事件分级 + 渲染，实测约 27ms）。
+    // 3 秒内直接返回上一份结果，自动采集新写入最多延迟这么久才反映到索引里。
+    const nowMs = Date.now();
+    if (readCache.text && nowMs - readCache.at < READ_TTL) return readCache.text;
     try {
       const { entries, events, graded } = build();
       const body = renderForPrompt(graded, { maxL1, maxL2, maxL3 });
       const c = {};
       for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
       const idx = dayIndex(graded);
-      return [
+      const text = [
         '【记忆事件索引 · 按遗忘曲线】',
         `完整流水 ${memDir()}（${entries.length} 条 / ${events.length} 事件）`,
         `每日摘要 ${digestDir()}　总报告 ${gradeFile()}`,
@@ -360,6 +367,8 @@ export function apply(ctx, config = {}) {
         '',
         body || '（暂无高留存事件）',
       ].join('\n');
+      readCache = { at: nowMs, text };
+      return text;
     } catch (err) {
       return `【记忆事件索引】读失败：${String(err?.message ?? err)}\n完整流水仍在 ${memDir()}`;
     }
