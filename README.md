@@ -175,9 +175,28 @@ DSH 的 `configForms` 服务对本插件返回的 `form` 对象是空壳 —— 
 
 **放弃面板后反而更清爽**：少一个 client bundle，少一层出错的可能，环境变量本来就更适合这种「一次配好不再动」的东西。
 
+### 自动采集（0.3.0）
+
+Bundle 默认打开自动采集。插件监听 DSH 的 `session/event`，只收用户和助手正文，工具回显、思考块、压缩替换和子代理默认排除。消息先进入队列，批量原子写入流水；启动时和每个扫描周期会从会话日志补漏。
+
+```yaml
+- id: memory-curve
+  name: dsh-memory-curve
+  config:
+    autoCollect: true
+    collectSubagents: false
+    collectFlushMs: 1500
+    collectScanMs: 60000
+    collectSummaryMs: 5000
+    # collectExcludeCwds: 'C:\private;D:\private'
+    # collectExcludeSessions: 'session-id'
+```
+
+每个 profile 的记忆目录下会有 `.memory-collector/state.json` 检查点。写入流水成功后才推进检查点；摘要刷新失败会保留待刷日期，下次继续。重复运行是幂等的，已有旧流水不重复收录。设置 `autoCollect: false` 后，手动采集命令仍可用。
+
 ## 首次使用（四步）
 
-**插件只负责读和检索，不负责自动采集。** 新用户在第一次采集前看到「（暂无高留存事件）」属于正常空索引，不是安装失败。
+**插件负责读、检索和自动采集。** 新用户第一次启动后，自动采集会从当前会话日志补漏；在首次采集完成前看到「（暂无高留存事件）」属于正常空索引。
 
 1. 安装 Bundle，重启 DSH，确认日志出现 `[memory-curve] context 注册: interpolate=false`。
 2. 在插件包目录执行采集脚本：
@@ -212,11 +231,11 @@ DSH 的 `configForms` 服务对本插件返回的 `form` 对象是空壳 —— 
 
 采集脚本会先探测目标目录是否可写，不可写就当场报错，不会静默改写到另一个目录。插件未配置 `config.memoryDir` 时，读取不存在的目录按空记忆处理；显式配置 `memoryDir` 时会尝试创建该目录。
 
-Windows UNC 路径请用双反斜杠开头，例如 `\\server\share\memory`；这种输入规范化后保留 `//` 前缀。当前版本直接填写 `//server/share/memory` 会丢掉一个前导斜杠，配置时用前一种写法。
+Windows UNC 路径两种写法都可用，例如 `\\server\share\memory` 或 `//server/share/memory`，规范化后统一为 `//server/share/memory`。
 
-**为什么不自动采集**：记忆是私密的。采哪些会话、留多久、写到哪里，由你决定。
+**采集范围与开关**：Bundle 安装默认开启自动采集；手动 `pnpm add` 默认不采集。可以用 `autoCollect: false` 关闭，已经写入的流水保留，不会被删除。只收用户和助手正文，工具结果、思考块、压缩替换、子代理默认排除；排除目录或会话使用 `collectExcludeCwds` / `collectExcludeSessions`。数据写入 `memoryDir`，默认是 `<DSH_HOME>/memory`。
 
-**跑完之后**：索引会在下一轮对话开始时出现。想立刻看到结果就重启一次 DSH。
+**跑完之后**：实时消息会进入后台队列，启动时也会从会话日志补漏；摘要刷新完成后下一轮对话就能看到索引。手动补漏使用 `node tools/memory-notes.mjs`，它和自动采集共用检查点，重复运行不会重复收录。
 
 ### 手动造流水也行
 
@@ -402,7 +421,7 @@ node tools/selftest.mjs
 
 stub 必须使用 `export default z`，因为源码是 `import z from '@deepseek-ai/schemastery'`。不造 stub 直接跑，会得到 `Cannot find package '@deepseek-ai/schemastery'`；这是宿主 peer 还没接入，不是插件逻辑失败。
 
-自检会在临时目录造最小流水，检查 Config、disabled、inject、apply、context、6 个工具、分级上限和 disposer，共 20 项。全过会打印 `✓ 全部通过 —— 干净环境可跑` 并返回 0。
+自检会在临时目录造最小流水，检查 Config、disabled、自动采集配置、inject、apply、context、6 个工具、分级上限和 disposer，共 28 项（Linux 因 UNC 路径断言跳过 1 项）。全过会打印 `✓ 全部通过 —— 干净环境可跑` 并返回 0。
 
 **临时目录不可写时**，指定一个可写位置：
 

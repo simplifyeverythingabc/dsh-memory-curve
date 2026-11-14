@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: ['20', '22']
+        node: ['22', '24']
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +36,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: 建一份最小流水
         run: |
@@ -81,7 +81,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       # src/index.js 用的是静态 import '@deepseek-ai/schemastery'，
       # 这个包只有 DSH 宿主里有。CI 里造一个最小 stub —— 只够让
@@ -129,7 +129,10 @@ jobs:
           export default z;
           EOF
 
-      - name: 接口自检（21 项；Linux 20）
+      - name: 自动采集与故障恢复测试
+        run: node --test tools/collector-test.mjs tools/collector-host-test.mjs
+
+      - name: 接口自检（28 项；Linux 27）
         env:
           DSH_HOME: /tmp/dsh-home-ci
           MC_SELFTEST_ROOT: /tmp

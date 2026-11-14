@@ -157,7 +157,8 @@ export function buildDailies(arg) {
   if (typeof arg === 'string') {
     throw new TypeError('buildDailies 的参数改成了对象形式：buildDailies({ memDir, digestDir })');
   }
-  const { memDir, digestDir } = arg || {};
+  const { memDir, digestDir, days } = arg || {};
+  const selectedDays = days ? new Set(days) : null;
   const entries = readEntries(memDir);
   if (!entries.length) return { written: [], total: 0 };
 
@@ -182,6 +183,7 @@ export function buildDailies(arg) {
   mkdirSync(digestDir, { recursive: true });
   const written = [];
   for (const [day, list] of [...byDay].sort()) {
+    if (selectedDays && !selectedDays.has(day)) continue;
     const body = renderDay(day, list, graded);
     writeFileSync(join(digestDir, `${day}.md`), body, 'utf8');
     // 机器可读旁挂：事件 -> 完整 ID 数组。

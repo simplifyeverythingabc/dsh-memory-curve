@@ -123,6 +123,10 @@ export function readEntries(memDir) {
     try { raw = readFileSync(join(memDir, fn), 'utf8'); } catch { continue; }
     let cur = null;
     for (const line of raw.split(/\r?\n/)) {
+      if (/^<!-- dsh-note:auto-(?:begin|end):7f3a -->$/.test(line)) {
+        if (cur) { out.push(cur); cur = null; }
+        continue;
+      }
       const mm = DAY_RE.exec(line);
       if (mm) {
         if (cur) out.push(cur);
@@ -134,6 +138,7 @@ export function readEntries(memDir) {
           buf: [],
         };
       } else if (cur) {
+        if (/^<!-- memory-source:[0-9a-f]{64} -->$/.test(line)) continue;
         cur.buf.push(line);
       }
     }

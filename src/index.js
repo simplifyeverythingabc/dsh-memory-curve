@@ -33,6 +33,7 @@ import { readEntries, clusterEvents, gradeEvents, renderForPrompt, LEVEL_NAME } 
 import { resolveMemDir, dshHome, normalizeDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL } from './access.js';
+import { mountAutoCollector, writeAtomic } from './collector.js';
 
 export const name = 'memory-curve';
 
@@ -60,6 +61,13 @@ export const Config = z.object({
   maxL1: z.number().min(0).max(200).default(12).description('L1 事件最多列几条，控制注入体积。'),
   maxL2: z.number().min(0).max(200).default(20).description('L2 事件最多列几条。'),
   maxL3: z.number().min(0).max(200).default(8).description('L3 事件最多列几条。'),
+  autoCollect: z.boolean().default(false).description('启用会话消息自动采集、启动补漏和摘要刷新；只保存用户与助手正文。'),
+  collectSubagents: z.boolean().default(false).description('自动采集是否包含子代理；默认排除，不影响已有流水。'),
+  collectExcludeCwds: z.string().default('').description('排除的工作目录，换行或分号分隔，包含其子目录。'),
+  collectExcludeSessions: z.string().default('').description('排除的会话 ID，换行或分号分隔。'),
+  collectFlushMs: z.number().min(100).max(60000).default(1500).description('消息批量落盘间隔（毫秒）。'),
+  collectScanMs: z.number().min(1000).max(3600000).default(60000).description('日志增量补漏间隔（毫秒）；启动时也会补漏。'),
+  collectSummaryMs: z.number().min(100).max(60000).default(5000).description('有变动时摘要合并刷新间隔（毫秒）。'),
 });
 
 
@@ -280,6 +288,33 @@ export function apply(ctx, config = {}) {
     console.warn('[memory-curve] 每日摘要生成失败:', String(err?.message ?? err));
   }
 
+  let collectorStatus = null;
+  if (config.autoCollect === true) {
+    ctx.effect(() => {
+      const bounded = (v, d, min, max) => Number.isFinite(v) ? Math.max(min, Math.min(max, v)) : d;
+      const auto = mountAutoCollector(ctx, {
+        memDir,
+        sessionsDir: join(dshHome(), 'sessions'),
+        includeSubagents: config.collectSubagents === true,
+        excludeCwds: config.collectExcludeCwds || '',
+        excludeSessions: config.collectExcludeSessions || '',
+        flushMs: bounded(config.collectFlushMs, 1500, 100, 60000),
+        scanMs: bounded(config.collectScanMs, 60000, 1000, 3600000),
+        summaryMs: bounded(config.collectSummaryMs, 5000, 100, 60000),
+        onDirty: async (days, dir) => {
+          buildDailies({ memDir: dir, digestDir: digestDir(), days });
+          cachedCluster = null;
+          const { graded } = build();
+          mkdirSync(join(dshHome(), 'memory-notes'), { recursive: true });
+          await writeAtomic(gradeFile(), report(graded));
+        },
+      });
+      collectorStatus = auto.collector.status;
+      console.log('[memory-curve] 自动采集已启用（正文事件 + 增量补漏）');
+      return () => auto.dispose();
+    }, 'memory-curve.collector');
+  }
+
   const read = () => {
     try {
       const { entries, events, graded } = build();
@@ -291,6 +326,9 @@ export function apply(ctx, config = {}) {
         '【记忆事件索引 · 按遗忘曲线】',
         `完整流水 ${memDir()}（${entries.length} 条 / ${events.length} 事件）`,
         `每日摘要 ${digestDir()}　总报告 ${gradeFile()}`,
+        ...(collectorStatus ? [collectorStatus.lastError
+          ? `自动采集：待重试 — ${collectorStatus.lastError.slice(0, 160)}`
+          : `自动采集：已启用；最近落盘 ${collectorStatus.lastSuccess || '等待首次完成'}；待摘要 ${collectorStatus.pendingDays} 天`] : []),
         `分级：L1 ${c.L1 || 0}　L2 ${c.L2 || 0}　L3 ${c.L3 || 0}　L4 ${c.L4 || 0}　L5 ${c.L5 || 0}`,
         '',
         '【最近几天 · 定位用】',

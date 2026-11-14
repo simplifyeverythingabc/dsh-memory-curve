@@ -98,7 +98,11 @@ try {
   if (cfg === undefined) {
     fail('Config 导出', 'undefined（宿主环境必须有）');
   } else if (cfg && cfg.type === 'object' && cfg.dict && typeof cfg.toJSON === 'function') {
-    const required = ['disabled', 'memoryDir', 'maxL1', 'maxL2', 'maxL3'];
+    const required = [
+      'disabled', 'memoryDir', 'maxL1', 'maxL2', 'maxL3',
+      'autoCollect', 'collectSubagents', 'collectExcludeCwds', 'collectExcludeSessions',
+      'collectFlushMs', 'collectScanMs', 'collectSummaryMs',
+    ];
     const missing = required.filter((k) => !cfg.dict[k]);
     if (missing.length) fail('Config 字段', '缺 ' + missing.join(', '));
     else ok('Config 字段', required.join(', '));
@@ -117,6 +121,27 @@ try {
     const md = cfg.dict.memoryDir;
     if (!md || md.type !== 'string') fail('memoryDir 类型', `应为 string，实际 ${md?.type}`);
     else ok('memoryDir 类型', `string, default=${JSON.stringify(md.meta?.default)}`);
+
+    const ac = cfg.dict.autoCollect;
+    if (!ac || ac.type !== 'boolean') fail('autoCollect 类型', `应为 boolean，实际 ${ac?.type}`);
+    else if (ac.meta?.default !== false) fail('autoCollect 默认值', `应为 false，实际 ${JSON.stringify(ac.meta?.default)}`);
+    else ok('autoCollect 类型', 'boolean, default=false');
+
+    const cs = cfg.dict.collectSubagents;
+    if (!cs || cs.type !== 'boolean') fail('collectSubagents 类型', `应为 boolean，实际 ${cs?.type}`);
+    else if (cs.meta?.default !== false) fail('collectSubagents 默认值', `应为 false，实际 ${JSON.stringify(cs.meta?.default)}`);
+    else ok('collectSubagents 类型', 'boolean, default=false');
+
+    for (const k of ['collectExcludeCwds', 'collectExcludeSessions']) {
+      const f = cfg.dict[k];
+      if (!f || f.type !== 'string') fail(`${k} 类型`, `应为 string，实际 ${f?.type}`);
+      else ok(`${k} 类型`, `string, default=${JSON.stringify(f.meta?.default)}`);
+    }
+    for (const k of ['collectFlushMs', 'collectScanMs', 'collectSummaryMs']) {
+      const f = cfg.dict[k];
+      if (!f || f.type !== 'number') fail(`${k} 类型`, `应为 number，实际 ${f?.type}`);
+      else ok(`${k} 类型`, `number, default=${f.meta?.default}`);
+    }
 
     for (const k of ['maxL1', 'maxL2', 'maxL3']) {
       const f = cfg.dict[k];

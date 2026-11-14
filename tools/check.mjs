@@ -38,7 +38,8 @@ if (targets.length === 0) {
 // 只防「0 个文件」不够：目录改名、后缀改了，会扫到 1 个文件并全绿。
 // 断言几个必需文件在不在，比断言数字稳 —— 数字会过期，文件名不会。
 const REQUIRED = [
-  'src/index.js', 'src/events.js', 'src/digest.js', 'src/access.js', 'src/paths.js',
+  'src/index.js', 'src/events.js', 'src/digest.js', 'src/access.js', 'src/paths.js', 'src/collector.js',
+  'tools/collector-test.mjs', 'tools/collector-host-test.mjs',
   'tools/check.mjs', 'tools/selftest.mjs', 'tools/verify-ids.mjs',
   // build-dailies 比 bench 更核心：apply 启动时就会调 buildDailies，它坏了主链路掉一半
   'tools/memory-notes.mjs', 'tools/build-dailies.mjs', 'tools/bench.mjs',
@@ -53,7 +54,7 @@ let bad = 0;
 for (const p of targets) {
   const rel = relative(root, p).replace(/\\/g, '/');
   try {
-    execFileSync(process.execPath, ['--check', p], { stdio: 'pipe' });
+    execFileSync(process.execPath, ['--check', p], { stdio: 'inherit' });
     console.log(`  ok   ${rel}`);
   } catch (e) {
     bad++;

@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-curve",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "按艾宾浩斯遗忘曲线给记忆事件分级：高留存的进上下文，低留存的只留文件。上千条对话压成几百字索引，完整记忆仍在磁盘上按需反查。",
   "type": "module",
   "license": "MIT",
@@ -49,7 +49,8 @@
     "displayName": "记忆事件分级（遗忘曲线）"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.15.0",
+    "dsh": ">=0.2.2-rc.3"
   },
   "peerDependencies": {
     "@deepseek-ai/schemastery": "*"
@@ -59,6 +60,8 @@
     "verify": "node tools/verify-ids.mjs",
     "verify:strict": "node tools/verify-ids.mjs --strict",
     "selftest": "node tools/selftest.mjs",
+    "test:collector": "node --test tools/collector-test.mjs tools/collector-host-test.mjs",
+    "collect": "node tools/memory-notes.mjs",
     "build": "node tools/build-dailies.mjs"
   }
 }
