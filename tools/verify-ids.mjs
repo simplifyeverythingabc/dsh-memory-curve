@@ -162,8 +162,11 @@ for (const fn of dayFiles) {
   const raw = readFileSync(join(MEM, fn), 'utf8');
   const day = fn.replace('.md', '');
   sizes.set(day, raw.length);
-  const b = (raw.match(/dsh-note:auto-begin:7f3a/g) || []).length;
-  const e = (raw.match(/dsh-note:auto-end:7f3a/g) || []).length;
+  // 行首锚定 + 必须带 <!-- 前缀。collector.js 会把正文里出现的同名标记转义成
+  // `&lt;!-- dsh-note:auto-end:7f3a --&gt;`，不加锚定就会把「聊过这个标记」的会话
+  // 永久算成多一个 END，verify 变假红 —— 而且会随每次讨论复发。
+  const b = (raw.match(/^<!-- dsh-note:auto-begin:7f3a -->[ \t\r]*$/gm) || []).length;
+  const e = (raw.match(/^<!-- dsh-note:auto-end:7f3a -->[ \t\r]*$/gm) || []).length;
   const heads = raw.match(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+［.+?］\s*<!--\s*m_[0-9]{8}_[0-9a-f]{6}\s*-->/gm) || [];
   const uniqHeads = new Set(heads).size;
   if (b !== e) broken.push(`${fn} 标记不配对：BEGIN ${b} / END ${e}`);

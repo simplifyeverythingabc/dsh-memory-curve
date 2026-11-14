@@ -454,7 +454,7 @@ node tools/selftest.mjs
 
 stub 必须使用 `export default z`，因为源码是 `import z from '@deepseek-ai/schemastery'`。不造 stub 直接跑，会得到 `Cannot find package '@deepseek-ai/schemastery'`；这是宿主 peer 还没接入，不是插件逻辑失败。
 
-自检会在临时目录造最小流水，检查 Config、disabled、自动采集配置、inject、apply、context、6 个工具、分级上限和 disposer，共 28 项（Linux 因 UNC 路径断言跳过 1 项）。全过会打印 `✓ 全部通过 —— 干净环境可跑` 并返回 0。
+自检会在临时目录造最小流水，检查 Config、disabled、自动采集配置、inject、apply、context、6 个工具、分级上限、`injectContext: false` 的拦截和 disposer，共 29 项（Linux 因 UNC 路径断言跳过 1 项）。全过会打印 `✓ 全部通过 —— 干净环境可跑` 并返回 0。
 
 **临时目录不可写时**，指定一个可写位置：
 

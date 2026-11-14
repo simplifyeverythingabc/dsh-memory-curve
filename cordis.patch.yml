@@ -1,7 +1,9 @@
 # dsh-memory-curve bundle patch
 #
 # 往宿主组合里插一行 dsh-memory-curve：把「按遗忘曲线分级后的事件索引」
-# 注册成提示变量 memory_curve（读），并注册六个工具（搜索 / 读摘要 / 取原文 / 列日期 / 看分级 / 重建）。
+# 注入系统提示（主通道是 systemPrompt.context，名字 memory-curve-index；宿主只给
+# prompt.variable 时才退回提示变量 memory_curve），并注册六个工具
+# （搜索 / 读摘要 / 取原文 / 列日期 / 看分级 / 重建）。
 #
 # 完整记忆不在这里 —— 它留在配置好的内存目录里（默认 <DSH_HOME>/memory）。
 # 这一行只负责把上千条对话压成几百字的标题，喂进系统提示。
@@ -13,7 +15,7 @@
         maxL1: 12
         maxL2: 20
         maxL3: 8
-        # 安装 0.3.0 Bundle 会启用后台采集；设 false 可关闭，已有流水保留。
+        # 安装 Bundle（0.3.0 起默认）会启用后台采集；设 false 可关闭，已有流水保留。
         autoCollect: true
         collectSubagents: false
         # collectExcludeCwds: 'C:\private;D:\private' # 路径及其子目录排除

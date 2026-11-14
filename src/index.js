@@ -367,6 +367,7 @@ export function apply(ctx, config = {}) {
         onDirty: async (days, dir) => {
           buildDailies({ memDir: dir, digestDir: digestDir(), days });
           cachedCluster = null;
+          dropReadCache();   // 采集刚落盘，别让 3 秒缓存把新条数压下去
           const { graded } = build();
           mkdirSync(join(dshHome(), 'memory-notes'), { recursive: true });
           await writeAtomic(gradeFile(), report(graded));
@@ -380,6 +381,8 @@ export function apply(ctx, config = {}) {
 
   const READ_TTL = 3000;
   let readCache = { at: 0, text: '' };
+  // 采集落盘后立刻作废缓存。函数声明有提升，onDirty 里可以提前调用。
+  function dropReadCache() { readCache = { at: 0, text: '' }; }
   const read = () => {
     // 短周期复用：DSH 每一步都会重新组装系统提示，一次修复里连续几次工具调用
     // 会各自触发一次完整重算（指纹 + 145 事件分级 + 渲染，实测约 27ms）。
@@ -398,7 +401,7 @@ export function apply(ctx, config = {}) {
         `每日摘要 ${digestDir()}　总报告 ${gradeFile()}`,
         ...(collectorStatus ? [collectorStatus.lastError
           ? `自动采集：待重试 — ${collectorStatus.lastError.slice(0, 160)}`
-          : `自动采集：已启用；最近落盘 ${collectorStatus.lastSuccess || '等待首次完成'}；待摘要 ${collectorStatus.pendingDays} 天`] : []),
+          : `自动采集：已启用；最近落盘 ${collectorStatus.lastSuccess ? fmtYMD(Date.parse(collectorStatus.lastSuccess)) : '等待首次完成'}；待摘要 ${collectorStatus.pendingDays} 天`] : []),
         `分级：L1 ${c.L1 || 0}　L2 ${c.L2 || 0}　L3 ${c.L3 || 0}　L4 ${c.L4 || 0}　L5 ${c.L5 || 0}`,
         '',
         '【最近几天 · 定位用】',
@@ -459,8 +462,13 @@ export function apply(ctx, config = {}) {
   }, 'memory-curve.context');
 
   // 兼容通道：作用域里没有 context 但有 variable 时退回变量（别的 profile 可能走这条）
+  //
+  // injectContext 的守卫必须放在这里，不只是主通道那处。否则「只有 variable 没有 context」
+  // 的 profile 上 injectContext=false 照样注册，日志还照常打「索引不注入」—— 配置说了假话，
+  // 比静默失效更难查。判断放在第一句，日志分支也不会提前走到。
   ctx.effect(() => {
     const prompt = ctx.systemPrompt;
+    if (config.injectContext === false) return () => {};
     if (typeof prompt?.context === 'function' || typeof prompt?.variable !== 'function') return () => {};
     return prompt.variable('memory_curve', read);
   }, 'memory-curve.variable');

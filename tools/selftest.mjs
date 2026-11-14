@@ -99,7 +99,7 @@ try {
     fail('Config 导出', 'undefined（宿主环境必须有）');
   } else if (cfg && cfg.type === 'object' && cfg.dict && typeof cfg.toJSON === 'function') {
     const required = [
-      'disabled', 'memoryDir', 'maxL1', 'maxL2', 'maxL3',
+      'disabled', 'memoryDir', 'maxL1', 'maxL2', 'maxL3', 'injectContext',
       'autoCollect', 'collectSubagents', 'collectExcludeCwds', 'collectExcludeSessions',
       'collectFlushMs', 'collectScanMs', 'collectSummaryMs',
     ];
@@ -158,6 +158,31 @@ try {
     }
   } else {
     fail('Config 导出', `形状不对：${typeof cfg}`);
+  }
+
+  // ── injectContext:false 的行为断言 ────────────────────────────────
+  //
+  // 只查「context 没注册」不够。曾经有过的 bug：兼容通道 prompt.variable 漏了守卫，
+  // 在「只有 variable 没有 context」的 profile 上 injectContext=false 照样注册变量，
+  // 日志却打印「索引不注入」—— 配置说了假话。这里两条通道一起断。
+  if (typeof mod.apply === 'function') {
+    const seen = [];
+    const probe = {
+      systemPrompt: {
+        context(def) { seen.push('context'); return () => {}; },
+        variable(nm) { seen.push(`variable:${nm}`); return () => {}; },
+      },
+      tools: { register() { return () => {}; } },
+      effect(fn) { const d = fn(); return typeof d === 'function' ? d : () => {}; },
+      on() { return () => {}; },
+    };
+    try {
+      mod.apply(probe, { injectContext: false });
+      if (seen.length) fail('injectContext:false 拦截', `仍注册了 ${seen.join(', ')}`);
+      else ok('injectContext:false 拦截', 'context 与 variable 都不注册');
+    } catch (e) {
+      fail('injectContext:false 拦截', `apply 抛错：${e?.message ?? e}`);
+    }
   }
 
   // ── 假宿主：照真宿主的校验规则

@@ -132,7 +132,7 @@ jobs:
       - name: 自动采集与故障恢复测试
         run: node --test tools/collector-test.mjs tools/collector-host-test.mjs
 
-      - name: 接口自检（28 项；Linux 27）
+      - name: 接口自检（29 项；Linux 28）
         env:
           DSH_HOME: /tmp/dsh-home-ci
           MC_SELFTEST_ROOT: /tmp

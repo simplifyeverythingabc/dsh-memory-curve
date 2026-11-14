@@ -1,3 +1,18 @@
+## [0.3.5] - 2026-11-14
+
+### 修复
+
+- 兼容通道（prompt.variable）补上 injectContext 守卫。此前在「只有 variable 没有 context」的 profile 上，injectContext: false 照样注册变量，日志却打印「索引不注入」。
+- erify-ids 的 AUTO 标记计数改为行首锚定并校验 <!-- 前缀，撤掉假红（真实数据从 exit 1 转为 exit 0）。
+- 采集状态行的「最近落盘」改用本地时间，不再裸拼 	oISOString()。
+- onDirty 落盘后立即作废 ead() 的 3 秒缓存，索引不再显示旧条数。
+
+### 新增
+
+- selftest 增加 injectContext: false 的行为断言（context 与 variable 两条通道一起断），检查项 28 → 29。
+- cordis.patch.yml 的通道说明与版本注释同步到当前实现。
+
+---
 # Changelog
 
 格式照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 来，版本号照 [语义化版本](https://semver.org/lang/zh-CN/)。
@@ -14,6 +29,44 @@
 - 跨平台路径测试（目前只在 Windows 上验证过）
 - 摘要生成支持自定义模板
 - 事件聚类支持手动合并 / 拆分
+
+---
+
+## [0.3.4] - 2026-11-14
+
+### 新增
+
+- `Config.injectContext`：设 `false` 后记忆索引不再注入系统提示，六个 `memory_curve_*` 工具照常可用。
+- `src/index.js` 的 Config 上方补一整段 token 说明：每步注入的原因、默认 2785 字符折合 1500–2000 token 的实测值、三档调节写法。
+- README 增加「token 开销与三档调节」章节。
+
+### 修复
+
+- 兼容通道（`prompt.variable`）补上 `injectContext` 守卫。此前在「只有 variable 没有 context」的 profile 上，`injectContext: false` 照样注册变量，日志却打印「索引不注入」，配置说了假话。
+
+---
+
+## [0.3.3] - 2026-11-14
+
+### 新增
+
+- 索引注入的短周期复用（3 秒）。连续几次工具调用不再重复重算，实测单次 27ms 降到 0.001ms。
+- `tools/selftest.mjs` 的 Config 必填字段加入 `injectContext`。
+
+---
+
+## [0.3.2] - 2026-11-14
+
+### 修复
+
+- `tools/verify-ids.mjs` 的 AUTO 标记计数改为行首锚定并校验 `<!--` 前缀。此前不锚定，正文里被转义过的同名标记会被算成额外的 END，导致 `verify` 假红并随每次讨论复发。
+- `src/index.js` 分级报告、事件表格和 `memory_curve_show` 改用本地时间渲染，修正与本地日分桶流水的时区错位。
+- `digest.js` 的 `grepDay` 在单条命中超出 `maxChars` 时退化为截断输出正文。
+- 索引主题短语在标点处断句并补省略号；`show` 正文和列表截断时标注原始长度。
+
+### 变更
+
+- 摘要里的不连续范围标注为「共 N 条，id 不相邻，按 event 键取全量」，保留 `+N` 供校验器解析。
 
 ---
 
