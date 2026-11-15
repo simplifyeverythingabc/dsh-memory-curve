@@ -855,6 +855,47 @@ try {
       } else {
         ok('抑制不影响等级', `三条 level 全不变（${lvNo}），suppress 正确回传 0.3`);
       }
+
+      // 0.8.0 的三个认知机制
+      // 睡眠巩固：0/1/4/10 夜 → 1.0 / 1.06 / 1.24 / 1.24（4 夜封顶）
+      const sBase = new Date(2026, 0, 1, 12, 0).getTime();
+      const sleepCases = [[0, 1], [1, 1.06], [4, 1.24], [10, 1.24]];
+      let sleepBad = null;
+      for (const [nights, want] of sleepCases) {
+        const got = evm.consolidationOf(sBase, sBase + nights * 86400000).factor;
+        if (Math.abs(got - want) > 1e-6) { sleepBad = `${nights} 夜期望 ${want}、实得 ${got}`; break; }
+      }
+      if (sleepBad) fail('睡眠巩固', sleepBad);
+      else ok('睡眠巩固', '0/1/4/10 夜 → 1.0 / 1.06 / 1.24 / 1.24（4 夜封顶）');
+
+      // 系列位置：一天 5 条 → 1.1, 1.05, 1, 1.05, 1.1
+      const spEvs = [0, 1, 2, 3, 4].map((i) => ({ day: '2026-01-01', startAt: sBase + i * 60000 }));
+      evm.applySerialPosition(spEvs);
+      const gotSerial = spEvs.map((e) => e.serial).join(',');
+      if (gotSerial !== '1.1,1.05,1,1.05,1.1') {
+        fail('系列位置', `5 条应得 U 形 1.1,1.05,1,1.05,1.1，实得 ${gotSerial}`);
+      } else {
+        // 只有一条时不该加（既是首又是尾，没有位置对比）
+        const one = [{ day: '2026-01-02', startAt: sBase }];
+        evm.applySerialPosition(one);
+        if (one[0].serial !== 1) fail('系列位置', `单条事件应不加成，实得 ${one[0].serial}`);
+        else ok('系列位置', '5 条 U 形正确，单条不加成');
+      }
+
+      // 唤醒倒 U：极高密度的 salience 必须回落，不能是峰值。
+      // 样本必须够多：6 个样本时 p90 与 p95 会取到同一个值（hiSpan=0），
+      // 走不到回落分支，测出来永远是平的。100 个才有区分度。
+      const arousal = Array.from({ length: 100 }, (_, i) => ({ sigDensity: i, items: [{}], texts: ['x'] }));
+      evm.salienceAll(arousal);
+      const peakEv = arousal.reduce((a, b) => (b.salience > a.salience ? b : a), arousal[0]);
+      const lastEv = arousal[arousal.length - 1];
+      if (!(peakEv.salience > lastEv.salience)) {
+        fail('唤醒倒U', `极端密度没被压住：峰值 ${peakEv.salience}(d=${peakEv.sigDensity}) ≤ 末条 ${lastEv.salience}(d=${lastEv.sigDensity})`);
+      } else if (peakEv.sigDensity === lastEv.sigDensity) {
+        fail('唤醒倒U', '峰值出现在密度最高处，倒 U 没生效');
+      } else {
+        ok('唤醒倒U', `峰值 ${peakEv.salience}(p${Math.round(peakEv.sigDensity)}）→ 极端回落到 ${lastEv.salience}`);
+      }
     }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));
@@ -900,10 +941,11 @@ try {
     // 六项、没有蔡加尼克 —— 表格里出现了一个公式里不存在的因子。这种漂移只看文档
     // 是发现不了的，得有断言钉住。
     const formulaLine = rp.split('\n').find((l) => l.includes('S = ')) || '';
-    const missingFactor = ['提取', '间隔', '显著', '未完成'].filter((k) => !formulaLine.includes(k));
+    const missingFactor = ['提取', '间隔', '显著', '未完成', '位置'].filter((k) => !formulaLine.includes(k));
     if (!formulaLine) fail('报告公式完整性', '报告里找不到 S 公式行');
     else if (missingFactor.length) fail('报告公式完整性', `S 公式缺乘数：${missingFactor.join('、')}`);
-    else ok('报告公式完整性', 'S 公式列全了 提取/间隔/显著/未完成');
+    else if (!rp.includes('巩固')) fail('报告公式完整性', 'R 公式里没有「巩固」，跨夜机制没进文案');
+    else ok('报告公式完整性', 'S 列全 提取/间隔/显著/未完成/位置，R 含巩固');
 
     // (3) 桶内排序要用 weight：同桶里 openness 高者在前
     const mkL1 = (idx, openness, count) => ({

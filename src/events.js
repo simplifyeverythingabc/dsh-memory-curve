@@ -144,13 +144,27 @@ export function salienceAll(events) {
   const at = (q) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))] ?? 0;
   const p50 = at(0.5);
   const p90 = at(0.9);
+  const p95 = at(0.95);
   const span = p90 - p50;
+  const hiSpan = p95 - p90;
   for (let i = 0; i < events.length; i++) {
     const d = raw[i];
     let m = 1;
     if (span > 1e-9 && d > p50) {
       const t = (d - p50) / span;                       // p50→1, p90→1 满格起点
-      m = d <= p90 ? 1 + 0.15 * t : 1.15 + 0.20 * Math.min(t - 1, 1);
+      if (d <= p90) {
+        m = 1 + 0.15 * t;
+      } else if (hiSpan <= 1e-9 || d <= p95) {
+        // p90 → p95：继续升到峰值 1.28
+        m = 1.15 + 0.13 * Math.min((d - p90) / Math.max(hiSpan, 1e-9), 1);
+      } else {
+        // p95 以上：**回落**（Yerkes-Dodson 后半段）
+        //
+        // 唤醒度和记忆强度不是单调关系，是倒 U：中等唤醒记得最牢，极高唤醒反而损害
+        // 编码 —— 人会用屏蔽/解离处理过量情绪，留下的是碎片而不是更清晰的记录。
+        // 早期的实现单调升到 1.35 封顶，等于假设「越激烈越难忘」，那是错的。
+        m = 1.28 - 0.18 * Math.min((d - p95) / Math.max(hiSpan, 1e-9), 1);
+      }
     }
     events[i].salience = Math.round(m * 1000) / 1000;
   }
@@ -482,6 +496,8 @@ export function clusterEvents(entries, opts = {}) {
   // 这里算过就不会再遍历一遍 8 万个 token。
   const { df, N } = docFreq(events);
   for (const ev of events) ev.entities = entitiesOf(ev, df, N);
+  // 位置效应必须在全量事件上算（复用前缀的事件也要重新定位），一次 O(n) 排序很便宜
+  applySerialPosition(events);
   const threads = linkThreads(events, opts.labelStore || null);
 
   // setState=false：算完只把 events 交出去，不碰全局状态。
@@ -559,6 +575,41 @@ export function entitiesOf(ev, df, N = 1) {
  */
 export const THREAD_SAME_DAY = 3;
 export const THREAD_CROSS_DAY = 3;
+
+/**
+ * 系列位置效应（serial position effect，0.8.0）
+ *
+ * 人回想一段连续经历时，记得最清的是**开头和结尾**，中间最模糊。
+ * 两个机制不同：开头有更多加工时间（进了长期记忆，primacy），结尾还留在短期缓冲里
+ * （recency）。合起来是一条 U 形曲线。
+ *
+ * 这里按「日内序列」算：一天里最早与最晚的事件 +10%，次早/次晚 +5%，中间不加。
+ * 一天只有一个事件时不加 —— 它既是开头又是结尾，没有位置对比可言。
+ *
+ * **为什么按天不按主题线**：位置效应是「同一段连续经历」内部的，一天是自然的边界
+ * （人按天划分经历）。按主题线算会让跨度几天的线里「第一天开头」和「最后一天结尾」
+ * 彼此加成，那不是位置效应。
+ */
+export function applySerialPosition(events) {
+  const byDay = new Map();
+  for (const ev of events) {
+    let list = byDay.get(ev.day);
+    if (!list) { list = []; byDay.set(ev.day, list); }
+    list.push(ev);
+  }
+  for (const list of byDay.values()) {
+    if (list.length < 2) {
+      for (const e of list) e.serial = 1;
+      continue;
+    }
+    list.sort((a, b) => a.startAt - b.startAt);
+    const n = list.length;
+    for (let i = 0; i < n; i++) {
+      const d = Math.min(i, n - 1 - i);       // 离两端最近的距离
+      list[i].serial = d === 0 ? 1.10 : d === 1 ? 1.05 : 1;
+    }
+  }
+}
 
 /**
  * 把事件串成「主题线」。
@@ -775,6 +826,41 @@ function docFreq(events) {
 export const POWER_BETA = 0.5;
 export const POWER_K = 6.39;
 
+/**
+ * 睡眠巩固（sleep-dependent consolidation，0.8.0）
+ *
+ * 真实的记忆巩固主要发生在**睡眠期间**：海马体在慢波睡眠里把当天的经历重放给皮层，
+ * 这一步离线完成，不占清醒时的认知资源。所以「隔一夜」和「隔一个白天」在记忆上不等价 ——
+ * 同样 24 小时，前者跨了一次睡眠，后者没有。
+ *
+ * 现在 `ageH` 只算绝对时间差，两者一视同仁。这一层把跨夜次数算出来，用它**折扣衰减的
+ * 速度**：跨过 4 夜的事件，同样日历时间下留存更高。
+ *
+ * 为什么乘在 R 的 ageH 上、而不是乘进 S：
+ *   S 是「当初记得多牢」，是个不随 now 变化的属性；跨夜次数每天都在涨，乘进 S 会让
+ *   「同一件旧事的 S 越来越大」——语义就错了。这里要表达的是「时间对它的侵蚀变慢了」。
+ */
+export function nightsBetween(fromMs, toMs) {
+  if (!(toMs > fromMs)) return 0;
+  const a = new Date(fromMs);
+  const b = new Date(toMs);
+  const da = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
+  const db = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+  return Math.max(0, Math.round((db - da) / 86400000));
+}
+
+/** 跨夜一次的巩固加成；封顶 4 次（再多的夜对模型没有增量信息，真实巩固也早饱和了） */
+export const CONSOLIDATION_PER_NIGHT = 0.06;
+export const CONSOLIDATION_MAX_NIGHTS = 4;
+
+export function consolidationOf(anchorMs, nowMs) {
+  const nights = nightsBetween(anchorMs, nowMs);
+  return {
+    nights,
+    factor: 1 + CONSOLIDATION_PER_NIGHT * Math.min(nights, CONSOLIDATION_MAX_NIGHTS),
+  };
+}
+
 /** 纯数字 / 十六进制碎片，做主题词没有信息量（7811 / 0x1c / 113mb） */
 const JUNK_TOK = /^(0x)?[0-9a-f]{2,}$|^\d+[a-z]{1,3}$/i;
 
@@ -853,10 +939,13 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
     const open = ev.openness || 0;
     const zeigarnik = 1 + 0.25 * open;        // 0.75 ~ 1.25
 
+    // 系列位置效应：一天里最早/最晚的事件记得更牢（见 applySerialPosition）
+    const serial = ev.serial || 1;            // 1.10 / 1.05 / 1.0
+
     const S = Math.log(1 + n)
       * (1 + 0.35 * Math.log(1 + spanDays))
       * (1 + density / 60)
-      * retrieval * spacing * salience * zeigarnik;
+      * retrieval * spacing * salience * zeigarnik * serial;
 
     // 再巩固（reconsolidation）：衰减起点取「最近一次活动」与「最近一次被提取」中
     // 更晚的那个。真实记忆每被想起一次就重新固化一次，遗忘曲线从那一刻重新起算；
@@ -866,8 +955,10 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
     const anchor = Math.max(ev.lastAt, Number.isFinite(accessAt) ? accessAt : 0);
     const ageH = Math.max((now - anchor) / 3600000, 0);
 
-    // 幂律遗忘
-    const R = Math.pow(1 + POWER_K * (ageH / (S * 24)), -POWER_BETA);
+    // 幂律遗忘。`consolidation` 折扣的是「时间侵蚀的速度」：跨过睡眠的记忆衰减更慢。
+    // 乘在分母而不是乘进 S —— S 是「当初多牢」，不该随 now 涨（见 consolidationOf 注释）。
+    const cons = consolidationOf(anchor, now);
+    const R = Math.pow(1 + POWER_K * (ageH / (S * 24 * cons.factor)), -POWER_BETA);
 
     // 主题词：取事件里 IDF 最高的几个（IDF 高 = 不常见 = 有辨识度）
     // 只依赖词集与 DF，与 now 无关 —— 走事件级缓存，不随每次工具调用重算。
@@ -913,6 +1004,11 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
       // 提取诱发遗忘：这条被别的提取压住了多少（0~0.35）。只影响排序，不改 level ——
       // 被压住的仍然看得到，只是排后面。见 access.js 的 SUPPRESS_* 注释。
       suppress: Math.round((acc.suppress || 0) * 1000) / 1000,
+      // 睡眠巩固：跨了几夜、折扣了多少衰减速度（1.0 ~ 1.24）。报告与测试要能看到。
+      nights: cons.nights,
+      consolidation: Math.round(cons.factor * 1000) / 1000,
+      // 系列位置：1.10（当天首尾）/ 1.05（次首尾）/ 1.0（中间或当天只有一条）
+      serial,
       topics: scored,
       head: head.slice(0, 90),
       tail: tail.slice(0, 90),
