@@ -8,10 +8,12 @@
  *
  * 算法：
  *   1. 读 <记忆目录>/YYYY-MM-DD.md，切成条目（日期 + 时间 + 说话人）
- *   2. 相邻条目：时间间隔 ≤ GAP_MIN 且共享关键词 → 归入同一事件
- *   3. 事件强度 S = ln(1+条数) × (1 + 0.35·ln(1+跨度天数)) × (1 + 密度加成)
- *   4. 留存 R = exp(−距今小时 ÷ (S × 24))
- *   5. 分级 L1/L2/L3/L4/L5
+ *   2. 相邻条目：间隔 ≤ GAP_MIN，或 ≤180 分钟且词集 Jaccard ≥ 0.18 → 归入同一事件
+ *   3. 强度 S = 结构项 × retrieval × spacing × salience × zeigarnik
+ *      具体系数见 gradeEvents() 里那一行乘法，这里不复制
+ *   4. 留存 R = (1 + POWER_K·x)^(-POWER_BETA)，x = 距今小时 ÷ (S×24)
+ *      —— 幂律，不是指数；长尾明显更厚，很久以前的事不会瞬间归零
+ *   5. 两条闸：绝对阈值 → 相对配额（L1≤10%、L2≤22%、L3≤25%），见 gradeEvents()
  *
  * 注入只给 L1+L2（+部分 L3）的梗概，完整内容永远留在记忆目录里。
  */
@@ -90,7 +92,9 @@ const JUNK = /^<\/?[a-z][a-z-]*>?$|^<\/?[a-z][a-z-]*\b[^>]*>\s*$/i;
  */
 const SIGNAL = [
   { re: /不对|错了|搞错|理解错|不是这样|弄反/g, w: 1.0 },
-  { re: /失败|报错|崩|挂掉|死机|超时|无响应|报错|异常|exception|error|failed|crash|broken/gi, w: 1.0 },
+  // 正则里「报错」原来写了两遍。不影响行为（alternation 在同一位置只命中一个分支，
+// lastIndex 前移，同一处文字不会被计两次），但留着会让读的人以为有加倍效果。
+  { re: /失败|报错|崩|挂掉|死机|超时|无响应|异常|exception|error|failed|crash|broken/gi, w: 1.0 },
   { re: /重来|反复|返工|折腾|再来一次|又改|又出/g, w: 0.8 },
   { re: /必须|一定|千万|别忘了|关键|重点|注意|小心|立刻|马上|赶紧/g, w: 0.8 },
   { re: /决定|最终|确定|敲定|就这个|结论|定了/g, w: 0.9 },
@@ -387,6 +391,18 @@ export function clusterEvents(entries) {
     }
   }
 
+  // 复用是**浅拷贝**：events 里放的是上一轮 clusterState 里的同一批事件对象，
+  // 下面的循环会原地改 cur 的 lastAt / endIdx / items / texts / toks。
+  //
+  // 不变量（改这里之前先读）：
+  //   ① 被复用的事件，其 endIdx < 本次的前缀长度 p，即它的全部条目都没变；
+  //   ② 只允许「追加」，不允许「合并、截断、重排」已有事件 —— 那些操作会让复用对象
+  //      与 entries 失去对应关系，而且不会崩，只会让分级悄悄偏移。
+  //   ③ clusterState.entries 必须与这批对象同时更新（下面最后一行），否则下一次
+  //      前缀比较会拿旧 entries 对不上新对象，退化成全量重算（只是慢，不会错）。
+  //
+  // 之所以不深拷贝：150 个事件 × 平均 20 条条目，每次工具调用复制一遍是纯浪费；
+  // 而上面的不变量在当前代码里是成立的（endIdx 单调递增，越界即停止复用）。
   const events = reuse > 0 ? prevEvents.slice(0, reuse) : [];
   const from = reuse > 0 ? prevEvents[reuse - 1].endIdx + 1 : 0;
   // cur 指向复用出来的最后一个事件：它还没封口，新条目仍可能并入它。
@@ -832,6 +848,9 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
       spacing: Math.round(spacing * 1000) / 1000,
       salience: Math.round(salience * 1000) / 1000,
       openness: Math.round(open * 1000) / 1000,
+      // 蔡加尼克乘数回传：报告要能看出「这条为什么高/低」。它是唯一可以小于 1 的
+      // 乘数（已收尾会扣分），所以报告那边得用绝对值判断要不要显示。
+      zeigarnik: Math.round(zeigarnik * 1000) / 1000,
       topics: scored,
       head: head.slice(0, 90),
       tail: tail.slice(0, 90),
@@ -900,6 +919,10 @@ export const LEVEL_NAME = {
   L1: 'L1 核心', L2: 'L2 长期', L3: 'L3 活跃', L4: 'L4 衰退', L5: 'L5 归档',
 };
 
+/** 主题线段最多几行。apply() 的兼容通道与 schema 都用这个上限；renderForPrompt 自己
+ * 也钳一次 —— 它是公开 API，直接调用（测试、外部脚本）时没有 schema 兜底。 */
+export const MAX_THREADS_CAP = 20;
+
 /** 生成注入用的精简文本：L1 给标题，L2/L3 各给一行 */
 export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, maxThreads = 3, threads = null, now = Date.now() } = {}) {
   const by = (lv) => graded.filter((g) => g.level === lv);
@@ -952,12 +975,15 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, max
   // 要么每次都得重做，还容易归纳错。
   //
   // 放在最前面，且只占 3 行：它是「目录」，不是正文。具体的还在下面。
-  if (maxThreads > 0 && threads && threads.length) {
+  const nThreads = Number.isFinite(maxThreads)
+    ? Math.max(0, Math.min(MAX_THREADS_CAP, Math.floor(maxThreads)))
+    : 0;
+  if (nThreads > 0 && threads && threads.length) {
     const mdOf = (ms) => {
       const d = new Date(ms);
       return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     };
-    const rows = threads.slice(0, maxThreads).map((t) => {
+    const rows = threads.slice(0, nThreads).map((t) => {
       const span = mdOf(t.startAt) === mdOf(t.lastAt)
         ? mdOf(t.startAt)
         : `${mdOf(t.startAt)}→${ago(t.lastAt)}`;
@@ -979,7 +1005,10 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, max
       const age = (now - g.startAt) / DAY;
       (age < 1 ? b.today : age < 7 ? b.week : b.older).push(g);
     }
-    const byS = (arr) => arr.slice().sort((x, y) => y.S - x.S);
+    // 桶内按 weight 排，不是按裸 S —— 0.4.2 把 weight（含未完成度）用在了 L2/L3 的
+    // topBy 上，却漏了 L1 的时间桶，等于「同一套权重只应用了一半」：一条三天前还没
+    // 着落的事，在桶内竞争时不会因为未完成而被提前，而它在 L2 里会。
+    const byS = (arr) => arr.slice().sort((x, y) => weight(y) - weight(x));
     const out = [];
     // 配额从总预算里扣：桶里能拿的不能超过「还剩多少名额」，
     // 否则 maxL1=8 时三个桶照样各取 4 条，配了个寂寞。

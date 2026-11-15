@@ -43,6 +43,11 @@ test('思考块/工具事件/压缩替换/非真实用户消息跳过', () => {
   assert.equal(messageFromEvent({ ...a, type: 'assistant/attempt' }, header), null);
   assert.equal(messageFromEvent({ ...a, type: 'tool/result' }, header), null);
   assert.equal(messageFromEvent({ ...a, surfaceOp: { op: 'replace' } }, header), null);
+  // 两种形状都要认：字符串 'append' 与对象 { op: 'append' }。0.5.4 之前只认字符串，
+  // 宿主传对象时正常追加会被当成替换静默跳过 —— 采集器不报错，只是有些对话没进流水。
+  assert.equal(messageFromEvent({ ...a, surfaceOp: 'append' }, header)?.text, '结论');
+  assert.equal(messageFromEvent({ ...a, surfaceOp: { op: 'append' } }, header)?.text, '结论');
+  assert.equal(messageFromEvent({ ...a, surfaceOp: { op: 'patch' } }, header), null);
   assert.equal(messageFromEvent({ ...a, data: { ...a.data, interrupted: true } }, header), null);
   const synthetic = user(2); synthetic.data.source.kind = 'system-prompt';
   assert.equal(messageFromEvent(synthetic, header), null);

@@ -43,6 +43,9 @@ const REQUIRED = [
   'tools/check.mjs', 'tools/selftest.mjs', 'tools/verify-ids.mjs',
   // build-dailies 比 bench 更核心：apply 启动时就会调 buildDailies，它坏了主链路掉一半
   'tools/memory-notes.mjs', 'tools/build-dailies.mjs', 'tools/bench.mjs',
+  // 导出与开发环境补齐：两个都是「不做就没人做」的脚本，容易在重构里被删掉
+  // 而没人发现（export 的输出文档不进仓库，setup 的 stub 只在 node_modules 里）
+  'tools/export-code.mjs', 'tools/setup-dev.mjs',
 ];
 const missing = REQUIRED.filter((r) => !targets.some((p) => p.replace(/\\/g, '/').endsWith(r)));
 if (missing.length) {

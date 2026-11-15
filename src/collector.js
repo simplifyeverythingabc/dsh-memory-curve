@@ -54,7 +54,11 @@ export function sessionAllowed(header = {}, options = {}) {
 export function messageFromEvent(event, header = {}, options = {}) {
   if (!sessionAllowed(header, options)) return null;
   if (event.type !== 'user/message' && event.type !== 'assistant/message') return null;
-  if (event.surfaceOp && event.surfaceOp !== 'append') return null;
+  // surfaceOp 可能是字符串也可能是个对象 `{ op: 'append' }` —— 取决于宿主版本。
+  // 0.5.4 之前直接拿它和 'append' 比，对象形式下 `{op:'append'} !== 'append'` 为真，
+  // 正常追加会被当成替换静默跳过：采集器不报错，用户只会发现「有些对话没进流水」。
+  const op = event.surfaceOp?.op ?? event.surfaceOp;
+  if (op && op !== 'append') return null;
   if (event.sourceEventSeqs?.length || event.data?.interrupted) return null;
   const msg = event.data?.message ?? event.data;
   const role = event.type === 'user/message' ? 'user' : 'assistant';

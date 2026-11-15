@@ -479,7 +479,9 @@ try {
     const eligible = gBig.filter((x) => x.R >= 0.568 && x.S >= 6).length;
     const cap = Math.max(3, Math.round(50 * 0.10));
     const dm = gBig.filter((x) => x.demoted).length;
-    if (eligible < 40) {
+    if (eligible < 20) {
+      // 阈值放宽到 20：调 POWER_K / 绝对阈值后，构造不出 40 个全合格的事件很正常，
+      // 那会让这条断言假红。20 个已经足够验证「配额把 L1 压到 10%」这件事。
       fail('相对配额', `夹具没构造好：只有 ${eligible} 个过绝对闸`);
     } else if (l1n > cap) {
       fail('相对配额', `L1 有 ${l1n} 个，超过配额 ${cap}`);
@@ -742,6 +744,65 @@ try {
     fail('主题线', e.message.slice(0, 90));
   }
 
+  // ── 0.5.5 审查修复项
+  //
+  // 这四条都是「不报错但结果悄悄错」的类型，静态看不出来，必须实测。
+  try {
+    const evm = await import('../src/events.js');
+    const accm = await import('../src/access.js');
+
+    // (1) 老记录（只有 n/last/first，没 ts）touch 之后时间线要有两个点
+    //     0.5.4 之前这里恒假：先把 rec.last 赋成 now，再拿 rec.last !== now 判空种子，
+    //     老记录拿到 []，只剩本次一个点 → spacingOf 一律返回 1，0.3.x 存量数据的
+    //     间隔效应永久失效。
+    const legacyFile = join(root, 'access-legacy.json');
+    const oldLast = new Date(Date.now() - 5 * 86400000).toISOString();
+    writeFileSync(legacyFile, JSON.stringify({ legacy1: { n: 3, last: oldLast, first: oldLast } }), 'utf8');
+    accm.touch(legacyFile, ['legacy1'], 'selftest');
+    const legacyRec = accm.sumAccess(legacyFile, ['legacy1']);
+    if (legacyRec.ts.length !== 2) {
+      fail('老记录补时间线', `touch 后 ts 应有 2 个点（旧 last + 本次），实得 ${legacyRec.ts.length}`);
+    } else {
+      const sp = evm.spacingOf(legacyRec.ts, Date.now());
+      ok('老记录补时间线', `ts 2 个点，spacing=${sp}（不再是恒 1）`);
+    }
+
+    // (2) 报告要能看到蔡加尼克乘数，包括小于 1 的「已收尾」扣分
+    const idxm = await import('../src/index.js');
+    const rp = idxm.report([
+      { idx: 0, level: 'L1', startAt: NOW, count: 3, spanDays: 1, S: 8, R: 0.9,
+        accessCount: 0, state: 'active', head: '甲', zeigarnik: 1.2 },
+      { idx: 1, level: 'L2', startAt: NOW, count: 3, spanDays: 1, S: 6, R: 0.7,
+        accessCount: 0, state: 'active', head: '乙', zeigarnik: 0.8 },
+    ]);
+    if (!rp.includes('蔡1.2')) fail('报告蔡加尼克列', '未完成（>1）的乘数没出现在修正列');
+    else if (!rp.includes('蔡0.8')) fail('报告蔡加尼克列', '已收尾（<1）的扣分被当成「无修正」漏掉了');
+    else ok('报告蔡加尼克列', '1.2 与 0.8 都显示（用绝对值判断）');
+
+    // (3) 桶内排序要用 weight：同桶里 openness 高者在前
+    const mkL1 = (idx, openness, count) => ({
+      idx, level: 'L1', startAt: NOW - 3600000, count, S: 8, head: 'E' + idx, openness,
+    });
+    // 两条 S 相同，只有 openness 不同 —— 按裸 S 排会保持原顺序，按 weight 排会交换
+    const bucket = evm.renderForPrompt([mkL1(0, 0, 2), mkL1(1, 1, 2)], {
+      maxL1: 1, maxL2: 0, maxL3: 0, maxThreads: 0, now: NOW,
+    });
+    if (!bucket.includes('E1')) fail('桶内按未完成度排序', `应选 openness 高的 E1，实得：${bucket.trim()}`);
+    else ok('桶内按未完成度排序', '同桶两条 S 相同时，openness 高的先进');
+
+    // (4) maxThreads 走兼容通道也不能超过 schema 上限 20
+    const manyThreads = Array.from({ length: 30 }, (_, i) => ({
+      label: 'T' + i, startAt: NOW - 10 * DAY, lastAt: NOW, items: 2, openness: 0,
+      members: [{ day: 'a', startAt: NOW - 10 * DAY }, { day: 'b', startAt: NOW }],
+    }));
+    const t20 = evm.renderForPrompt([], { maxL1: 0, maxL2: 0, maxL3: 0, maxThreads: 200, threads: manyThreads, now: NOW });
+    const lineCount = (t20.match(/^- T\d+/gm) || []).length;
+    if (lineCount > 20) fail('maxThreads 上限', `renderForPrompt 直接传 200 输出了 ${lineCount} 行（应 ≤20）`);
+    else ok('maxThreads 上限', `renderForPrompt 侧最多 20 行（实得 ${lineCount}）`);
+  } catch (e) {
+    fail('0.5.5 审查修复项', e.message.slice(0, 90));
+  }
+
   // ── 工具有没有真的干活
   const toText = (name, raw) => {
     const tool = tools[name];
@@ -780,6 +841,27 @@ try {
   const m = searchText.match(/m_\d{8}_[0-9a-f]{6}/);
   if (m) {
     await run('memory_curve_raw', () => tools.memory_curve_raw.execute({ id: m[0], maxChars: 100 }));
+
+    // 批量 ids：一个坏区间不能拖垮整批。
+    // 0.5.4 之前 expandRange 一抛错就 `return` 整个结果，同批里已经解析出来的
+    // 全部作废 —— 用户混用「单条 + 哈希范围 + 事件键」时几乎必然踩到。
+    try {
+      const goodId = m[0];
+      const mixed = await tools.memory_curve_raw.execute({
+        ids: [goodId, 'm_20260115_a1b2c3..m_20260116_d4e5f6'],
+        maxChars: 3000,
+      });
+      const txt = String(mixed?.text || '');
+      if (!txt.includes(goodId)) {
+        fail('raw 批量不中断', `坏区间把整批拖垮了，正常 id ${goodId} 的内容没返回：${txt.slice(0, 80)}`);
+      } else if (!txt.includes('已跳过')) {
+        fail('raw 批量不中断', '正常结果回来了，但没有告知跳过了哪一项');
+      } else {
+        ok('raw 批量不中断', '坏区间被跳过并告知，正常 id 仍返回');
+      }
+    } catch (e) {
+      fail('raw 批量不中断', e.message.slice(0, 80));
+    }
   } else {
     fail('memory_curve_raw', '搜索结果里没有 id');
   }

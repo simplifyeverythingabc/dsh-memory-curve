@@ -69,11 +69,15 @@ export function touch(file, ids, query = '') {
   for (const id of ids) {
     if (!id) continue;
     const rec = data[id] || { n: 0, last: null, first: now, ts: [] };
+    // 先取旧 last 再覆盖 —— 0.5.4 之前这里写的是「rec.last !== now ? [rec.last] : []」，
+    // 而上一行刚把 rec.last 赋成 now，那个比较恒假，于是老记录（0.3.x 只有 n/last/first、
+    // 没有 ts）拿到空种子，只剩本次一个点，mergeTs 不足两点、spacingOf 一律返回 1 ——
+    // 0.3.x 存量数据的间隔效应永久失效，而且不报错。
+    const prevLast = rec.last;
     rec.n += 1;
     rec.last = now;
     if (query) rec.q = String(query).slice(0, 60);
-    // 时间戳序列：老记录可能没有 ts，补成只含 last 的起点，再追加本次
-    if (!Array.isArray(rec.ts)) rec.ts = rec.last && rec.last !== now ? [rec.last] : [];
+    if (!Array.isArray(rec.ts)) rec.ts = prevLast ? [prevLast] : [];
     rec.ts.push(now);
     if (rec.ts.length > TS_KEEP) rec.ts = rec.ts.slice(rec.ts.length - TS_KEEP);
     data[id] = rec;

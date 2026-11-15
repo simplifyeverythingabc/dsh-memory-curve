@@ -10,10 +10,14 @@
  *   上下文里看到线索 → memory_curve_day 读那天的摘要
  *   → 摘要里定位到具体事件 → memory_curve_raw 用关键词回原文
  *
- * 分级依据（艾宾浩斯）：
- *   强度 S = ln(1+条数) × (1 + 0.35·ln(1+跨度天数)) × (1 + 密度/60)
- *   留存 R = exp(−距今小时 ÷ (S × 24))
- *   L1 R≥0.72 且 S≥6　L2 R≥0.5 且 S≥4　L3 R≥0.3　L4 R≥0.12　L5 其余
+ * 分级依据：**公式与阈值不在文件头复制。**
+ *   唯一可信的表述是 report() 生成的那段公式头 —— selftest 的「报告公式文案」
+ *   在守它。系数与阈值本身在 src/events.js：POWER_K / POWER_BETA 常量、
+ *   gradeEvents() 里的绝对阈值与相对配额。
+ *
+ *   为什么不再抄一份：0.3.9 → 0.5.4 之间这里一直是老的指数公式和老阈值，
+ *   实际早换成了幂律 + 再巩固 + 四个乘数。文件头是新读者第一眼看到的东西，
+ *   写错了比没有更糟；同一份公式两处维护，必然再次漂移。
  *
  * 「遗忘」的动作：L4/L5 不进上下文，但文件照旧留着，需要时按上面那条链去翻。
  */
@@ -298,6 +302,9 @@ export function report(graded) {
       if ((g.spacing || 1) > 1) mods.push(`间${g.spacing}`);
       if ((g.salience || 1) > 1) mods.push(`显${g.salience}`);
       if ((g.retrieval || 1) > 1) mods.push(`取${g.retrieval}`);
+      // 蔡加尼克是唯一可以小于 1 的乘数（已收尾会扣分），所以用绝对值判断：
+      // 只写 `> 1` 的话，所有「已收尾」的扣分永远不会显示出来。
+      if (Math.abs((g.zeigarnik || 1) - 1) > 0.001) mods.push(`蔡${g.zeigarnik}`);
       const mod = mods.length ? mods.join(' ') : '—';
       const lvMark = g.demoted ? `${g.level}↓` : g.level;
       L.push(`| ${g.idx} | ${t} | ${g.count} | ${g.spanDays}天 | ${g.S} | ${g.R} | ${mod} | ${g.accessCount || 0}次 | ${lvMark} | ${st} | ${head} |`);
@@ -343,9 +350,11 @@ export function apply(ctx, config = {}) {
   liveConfig = config;
   ensureConfiguredDir();
 
-  // schema 是第一道闸（.min(0).max(200)），这里是第二道 —— NaN / Infinity 都能穿过
-  // typeof 检查（typeof NaN === 'number'），得用 Number.isFinite 才算数。
-  const num = (v, d) => (Number.isFinite(v) ? Math.max(0, Math.min(200, v)) : d);
+  // schema 是第一道闸，这里是第二道 —— NaN / Infinity 都能穿过 typeof 检查
+  // （typeof NaN === 'number'），得用 Number.isFinite 才算数。
+  // cap 默认 200 是给 maxL1/2/3 的上限；maxThreads 的 schema 上限是 20，
+  // 走兼容通道时不能让它放大到 200（那会多注入 180 行主题线）。
+  const num = (v, d, cap = 200) => (Number.isFinite(v) ? Math.max(0, Math.min(cap, v)) : d);
   const maxL1 = num(config.maxL1, MAX_L1);
   const maxL2 = num(config.maxL2, MAX_L2);
   const maxL3 = num(config.maxL3, MAX_L3);
@@ -396,22 +405,29 @@ export function apply(ctx, config = {}) {
   }
 
   const READ_TTL = 3000;
-  let readCache = { at: 0, text: '' };
+  // 缓存键必须带上会影响渲染的四个配置值（全是 .volatile()，可以热改）。
+  // 只按时间缓存的话，3 秒内把 maxL1 从 12 改成 3 看不到任何变化，
+  // 只有等采集器落盘触发 dropReadCache 才生效 —— 调参/测试时会以为「改了没反应」。
+  const readKeyOf = () => `${maxL1}|${maxL2}|${maxL3}|${num(config.maxThreads, MAX_THREADS, 20)}`;
+  let readCache = { at: 0, key: '', text: '' };
   // 采集落盘后立刻作废缓存。函数声明有提升，onDirty 里可以提前调用。
-  function dropReadCache() { readCache = { at: 0, text: '' }; }
+  function dropReadCache() { readCache = { at: 0, key: '', text: '' }; }
   const read = () => {
     // 短周期复用：DSH 每一步都会重新组装系统提示，一次修复里连续几次工具调用
     // 会各自触发一次完整重算（指纹 + 145 事件分级 + 渲染，实测约 27ms）。
     // 3 秒内直接返回上一份结果，自动采集新写入最多延迟这么久才反映到索引里。
     const nowMs = Date.now();
-    if (readCache.text && nowMs - readCache.at < READ_TTL) return readCache.text;
+    const readKey = readKeyOf();
+    if (readCache.text && readCache.key === readKey && nowMs - readCache.at < READ_TTL) return readCache.text;
     try {
-      const { entries, events, graded, threads } = build();
+      // 构建与渲染共用同一个 now：各取一次的话，跨午夜那一瞬间分级算的「距今」
+      // 和渲染算的「今天/昨天」会落在两天上，出现「今天(11-14)」这类自相矛盾。
+      const { entries, events, graded, threads } = build(nowMs);
       const body = renderForPrompt(graded, {
         maxL1, maxL2, maxL3,
-        maxThreads: num(config.maxThreads, MAX_THREADS),
+        maxThreads: num(config.maxThreads, MAX_THREADS, 20),
         threads,
-        now: Date.now(),
+        now: nowMs,
       });
       const c = {};
       for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
@@ -438,7 +454,7 @@ export function apply(ctx, config = {}) {
         '',
         body || '（暂无高留存事件）',
       ].join('\n');
-      readCache = { at: nowMs, text };
+      readCache = { at: nowMs, key: readKey, text };
       return text;
     } catch (err) {
       return `【记忆事件索引】读失败：${String(err?.message ?? err)}\n完整流水仍在 ${memDir()}`;
@@ -644,23 +660,31 @@ export function apply(ctx, config = {}) {
         // ② 批量 ids（元素可以是单条，也可以是 m_a..m_b 范围）+ 可选 pattern 二次过滤
         if (Array.isArray(args?.ids) && args.ids.length) {
           let ids = [];
-          let evInfo = null;
+          // 单项失败不能拖垮整批：以前 expandRange 一抛错就 `return` 整个结果，
+          // 用户传 ["m_x", "m_a..m_b（两端哈希，无法展开）", "event:e_…"] 时，
+          // 第一和第三条已经解析出来的全部作废，只拿到一句错误。
+          // 现在收集错误、跳过该项继续，最后把正常结果和跳过说明一起给。
+          const errs = [];
           for (const spec of args.ids) {
             const s2 = String(spec || '').trim();
             // event:e_20261109_1255 -> 从 ids.json 取完整数组。
             // 摘要里标 +N（不连续）的事件只能这样取，靠范围展开会拉进不属于它的条目。
             if (s2.startsWith('event:')) {
               const r2 = eventIds({ digestDir: digestDir(), eventKey: s2.slice(6) });
-              if (!r2) return { text: `找不到事件 ${s2}，检查 _digest 下的 ids.json 是否存在` };
-              evInfo = r2;
+              if (!r2) { errs.push(`找不到事件 ${s2}`); continue; }
               ids = ids.concat(r2.ids);
             } else {
               // expandRange 会对真正的区间抛错（内容哈希无法展开），
               // 这里转成给人看的提示，不让它冒到工具层当异常。
               try { ids = ids.concat(expandRange(s2)); }
-              catch (e) { return { text: String(e?.message ?? e) }; }
+              catch (e) { errs.push(`跳过 ${s2}：${e?.message ?? e}`); }
             }
           }
+          // 一条都没解析出来时，把错误原样给人看，别退化成「范围内没命中」
+          if (!ids.length) {
+            return { text: errs.length ? errs.join('\n') : 'ids 里没有可用的条目' };
+          }
+          const warn = errs.length ? `\n\n（已跳过 ${errs.length} 项：${errs.join('；')}）` : '';
           // 范围内二次过滤：摘要事件头覆盖 28 条时，通常只要其中几条
           const pat = String(args?.pattern || '').trim();
           let pool = ids;
@@ -674,7 +698,7 @@ export function apply(ctx, config = {}) {
             }
             pool = hit;
           }
-          if (!pool.length) return { text: `范围内没命中${pat ? `「${pat}」` : ''}（检查 ${ids.length} 条）` };
+          if (!pool.length) return { text: `范围内没命中${pat ? `「${pat}」` : ''}（检查 ${ids.length} 条）${warn}` };
           const r = readByIds({ memDir: memDir(), ids: pool, maxChars });
           // 只记「真正进入上下文」的那几条。以前用 pool.slice(0, r.found)：
           // pool 里夹着缺失 id 时，被记成「查过」的是缺失项，真正返回的后一条没记，
@@ -682,7 +706,7 @@ export function apply(ctx, config = {}) {
           touch(accessFile(), [...new Set(r.picked)], 'raw:ids');
           const head = pat ? `范围内命中 ${pool.length}/${ids.length} 条` : `共 ${r.total} 条`;
           const tail = r.found < r.total ? `\n\n（本次只取到 ${r.found} 条，受 maxChars=${maxChars} 限制；要更多就加大 maxChars 或用 pattern 缩小）` : '';
-          return { text: `# ${head}\n\n${r.text}${tail}` };
+          return { text: `# ${head}\n\n${r.text}${tail}${warn}` };
         }
         // ③ 日期 + 关键词
         const day = String(args?.day || '').trim();
