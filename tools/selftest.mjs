@@ -813,6 +813,48 @@ try {
       } else {
         ok('setState 隔离', `全局主题线未变，上一轮 events 未被原地延长（${lenBefore} 条不变）`);
       }
+
+      // 提取诱发遗忘（RIF）：抑制的数学与「只碰 rank 不碰 level」
+      const accSup = await import('../src/access.js');
+      const supFile = join(root, 'sup-math.json');
+      writeFileSync(supFile, JSON.stringify({ zz: { n: 1, last: new Date().toISOString(), ts: [new Date().toISOString()] } }), 'utf8');
+      const s0 = accSup.sumAccess(supFile, ['zz']);
+      accSup.suppress(supFile, ['zz'], 0.12);
+      const s1 = accSup.sumAccess(supFile, ['zz']);
+      const s6 = accSup.sumAccess(supFile, ['zz'], Date.now() + 6 * 3600000);
+      const s24 = accSup.sumAccess(supFile, ['zz'], Date.now() + 24 * 3600000);
+      if (s0.suppress !== 0) {
+        fail('抑制半衰期', `未抑制时应为 0，实得 ${s0.suppress}`);
+      } else if (Math.abs(s1.suppress - 0.12) > 1e-6) {
+        fail('抑制半衰期', `刚抑制应 0.12，实得 ${s1.suppress}`);
+      } else if (Math.abs(s6.suppress - 0.06) > 1e-6) {
+        fail('抑制半衰期', `6 小时后应 0.06（半衰期），实得 ${s6.suppress}`);
+      } else if (Math.abs(s24.suppress - 0.0075) > 1e-4) {
+        fail('抑制半衰期', `24 小时后应 ≈0.0075，实得 ${s24.suppress}`);
+      } else {
+        ok('抑制半衰期', `0 → 0.12 → 6h ${s6.suppress} → 24h ${s24.suppress}`);
+      }
+
+      // 抑制只乘 rank，绝不能改 level —— 改了就变成「搜过 A 之后 B 突然降级」，
+      // 那是 bug 体验不是记忆。用同一组事件带/不带抑制各跑一次，level 必须逐条相同。
+      const mkSup = (idx) => ({
+        day: '2026-01-15', startAt: NOW - DAY, lastAt: NOW - DAY,
+        items: new Array(6).fill({}), texts: ['测试'], toks: new Set(['aa', 'bb']),
+        ids: [`m_sup_${idx}`], salience: 1, openness: 0,
+      });
+      const supEvs = [0, 1, 2].map(mkSup);
+      evm.clearClusterCache();
+      const gNo = evm.gradeEvents(supEvs.map((e) => ({ ...e, items: [...e.items] })), NOW, () => ({ n: 1, last: null, ts: [], suppress: 0 }));
+      const gYes = evm.gradeEvents(supEvs.map((e) => ({ ...e, items: [...e.items] })), NOW, () => ({ n: 1, last: null, ts: [], suppress: 0.3 }));
+      const lvNo = gNo.map((g) => g.level).join(',');
+      const lvYes = gYes.map((g) => g.level).join(',');
+      if (lvNo !== lvYes) {
+        fail('抑制不影响等级', `level 被抑制改了：${lvNo} → ${lvYes}`);
+      } else if (!(gYes[0].suppress === 0.3)) {
+        fail('抑制不影响等级', `suppress 没回传进 graded：${gYes[0].suppress}`);
+      } else {
+        ok('抑制不影响等级', `三条 level 全不变（${lvNo}），suppress 正确回传 0.3`);
+      }
     }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));

@@ -839,7 +839,7 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
 
     // 实证权重：这条路上的记忆被真正查过几次。查过就是投票，
     // 比单靠条数密度猜更可信。没查过则为 1，不奖不罚。
-    const acc = accessFn ? accessFn(ev) : { n: 0, last: null, ts: [] };
+    const acc = accessFn ? accessFn(ev) : { n: 0, last: null, ts: [], suppress: 0 };
     // 提取强度：边际递减 —— 第 1 次提取的巩固价值远大于第 20 次。
     const retrieval = 1 + 0.18 * Math.log(1 + (acc.n || 0));
 
@@ -910,6 +910,9 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
       // 蔡加尼克乘数回传：报告要能看出「这条为什么高/低」。它是唯一可以小于 1 的
       // 乘数（已收尾会扣分），所以报告那边得用绝对值判断要不要显示。
       zeigarnik: Math.round(zeigarnik * 1000) / 1000,
+      // 提取诱发遗忘：这条被别的提取压住了多少（0~0.35）。只影响排序，不改 level ——
+      // 被压住的仍然看得到，只是排后面。见 access.js 的 SUPPRESS_* 注释。
+      suppress: Math.round((acc.suppress || 0) * 1000) / 1000,
       topics: scored,
       head: head.slice(0, 90),
       tail: tail.slice(0, 90),
@@ -936,7 +939,12 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
 
   // ── 排序键：又强又新 ─────────────────────────────────────────────────
   // 单看 S 会让「很久以前连聊几小时」霸榜，单看 R 会让「刚才说了句废话」进核心。
-  const rank = (g) => g.R * Math.log(1 + g.S);
+  // 单看 S 会让「很久以前连聊几小时」霸榜，单看 R 会让「刚才说了句废话」进核心。
+  // 再乘 (1 - suppress)：被别的提取压住的那批往后排（retrieval-induced forgetting）。
+  // 注意抑制**只进 rank，不进 level** —— 绝对阈值那道闸不认它，所以被压住的仍在原来的
+  // 等级里，只是配额竞争时排在后面。把它做进 level 会让「搜过 A 之后 B 突然消失」，
+  // 那是 bug 体验，不是记忆。
+  const rank = (g) => g.R * Math.log(1 + g.S) * (1 - (g.suppress || 0));
 
   // ── 第二道闸：相对配额 ───────────────────────────────────────────────
   // 纯绝对阈值有个结构性毛病：总量越大，够到阈值的事件越多，L1 从 19 涨到 20 再涨

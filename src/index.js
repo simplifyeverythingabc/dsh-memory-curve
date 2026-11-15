@@ -36,7 +36,7 @@ import z from '@deepseek-ai/schemastery';
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, currentThreads as clusterThreads, LEVEL_NAME } from './events.js';
 import { resolveMemDir, dshHome, normalizeDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
-import { touch, sumAccess, stateOf, STATE_LABEL } from './access.js';
+import { touch, sumAccess, stateOf, STATE_LABEL, suppress, SUPPRESS_DEFAULT } from './access.js';
 import { mountAutoCollector, writeAtomic } from './collector.js';
 
 export const name = 'memory-curve';
@@ -325,8 +325,9 @@ function build(now = Date.now()) {
     cachedCluster = { fp, entries, events };
   }
   const { entries, events } = cachedCluster;
-  // 访问证据：这个事件下所有 id 的累计被查次数
-  const accessFn = (ev) => sumAccess(accessFile(), ev.ids || []);
+  // 访问证据：这个事件下所有 id 的累计被查次数、提取时间线、当前残余抑制
+  // now 必须传进去 —— 抑制是按半衰期恢复的，用默认的 Date.now() 会和 build(now) 错开
+  const accessFn = (ev) => sumAccess(accessFile(), ev.ids || [], now);
   const graded = gradeEvents(events, now, accessFn);
   for (const g of graded) {
     const src = events[g.idx];
@@ -335,6 +336,61 @@ function build(now = Date.now()) {
     g.state = stateOf({ accessCount: g.accessCount, lastAccess: g.lastAccess, R: g.R }, now);
   }
   return { entries, events, graded, threads: clusterThreads() };
+}
+
+/**
+ * 提取的两个副作用：抑制竞争者（RIF）+ 扩散激活的关联。
+ *
+ * 放一起算是因为它们都需要「这次查了谁」和「谁跟它像」，分两遍扫等于白扫。
+ *
+ * 抑制：与命中事件共享 >=2 个实体的其他事件，被压住 12%（半衰期 6 小时恢复）。
+ *   —— 这是真实的记忆行为：想起 A 方案会暂时压住 B 方案。但它**只进排序 rank**，
+ *   不改 level，所以 B 不会凭空消失，只是排后面。
+ *
+ * 关联：共享实体最多的前 limit 条，作为「因为想到这个，所以想到那个」返回。
+ *   —— 记忆是网络的，现在检索返回的是孤立的点，这一层把边补上。
+ */
+export function afterRetrieval(touchedIds, limit = 3, evsIn = null) {
+  const empty = { suppressed: 0, related: [] };
+  // evsIn 是给测试用的注入口：插件内走 cachedCluster（build() 已经填好），
+  // 插件外（selftest / 脚本）拿不到那个模块变量，只能自己传。
+  const evs = evsIn || (cachedCluster && cachedCluster.events) || [];
+  if (!touchedIds || !touchedIds.length || !evs.length) return empty;
+
+  const touched = new Set(touchedIds);
+  const hit = evs.filter((e) => (e.ids || []).some((id) => touched.has(id)));
+  if (!hit.length) return empty;
+
+  // 候选：与任一命中事件共享 >=2 个实体。阈值 2 是因为主题线用 3，这里要更宽一点 ——
+  // 检索时的「顺带想起」本来就该比「同一个主题」更松。
+  const scored = [];
+  for (const e of evs) {
+    if (hit.includes(e) || !e.entities || !e.entities.size) continue;
+    let shared = 0;
+    for (const t of hit) {
+      if (!t.entities) continue;
+      for (const x of t.entities) if (e.entities.has(x)) shared++;
+    }
+    if (shared >= 2) scored.push({ ev: e, shared });
+  }
+  if (!scored.length) return empty;
+  scored.sort((a, b) => b.shared - a.shared);
+  const top = scored.slice(0, limit);
+
+  const sup = suppress(accessFile(), top.flatMap((x) => x.ev.ids || []), SUPPRESS_DEFAULT);
+  return { suppressed: sup.suppressed, related: top };
+}
+
+/** 把关联渲染成给人看的几行；没有关联返回空串 */
+export function renderRelated(related) {
+  if (!related || !related.length) return '';
+  const lines = related.map(({ ev, shared }) => {
+    const id = (ev.ids && ev.ids[0]) || '';
+    const head = String((ev.texts && ev.texts[0]) || '')
+      .replace(/[`*#|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    return `- [${id}] 共享${shared}个线索　${head}`;
+  });
+  return `\n\n【顺手想起 · 共享线索】\n${lines.join('\n')}`;
 }
 
 export function report(graded) {
@@ -719,7 +775,9 @@ export function apply(ctx, config = {}) {
           const one = readById({ memDir: memDir(), id });
           if (!one) return { text: `没有 id ${id}，检查是不是抄错了` };
           touch(accessFile(), [id], 'raw:id');
-          return { text: `# ${one.id}　${one.day}\n\n${one.text}` };
+          // 读原文 = 真正的「提取」。这一步的副作用是双向的：压住竞争者（RIF）、带出关联。
+          const side = afterRetrieval([id]);
+          return { text: `# ${one.id}　${one.day}\n\n${one.text}${renderRelated(side.related)}` };
         }
         // ② 批量 ids（元素可以是单条，也可以是 m_a..m_b 范围）+ 可选 pattern 二次过滤
         if (Array.isArray(args?.ids) && args.ids.length) {
@@ -773,10 +831,12 @@ export function apply(ctx, config = {}) {
           // 只记「真正进入上下文」的那几条。以前用 pool.slice(0, r.found)：
           // pool 里夹着缺失 id 时，被记成「查过」的是缺失项，真正返回的后一条没记，
           // 截断时（found < pool.length）同样错位。readByIds 现在把实际取到的 id 回传。
-          touch(accessFile(), [...new Set(r.picked)], 'raw:ids');
+          const picked = [...new Set(r.picked)];
+          touch(accessFile(), picked, 'raw:ids');
+          const side = afterRetrieval(picked);
           const head = pat ? `范围内命中 ${pool.length}/${ids.length} 条` : `共 ${r.total} 条`;
           const tail = r.found < r.total ? `\n\n（本次只取到 ${r.found} 条，受 maxChars=${maxChars} 限制；要更多就加大 maxChars 或用 pattern 缩小）` : '';
-          return { text: `# ${head}\n\n${r.text}${tail}${warn}` };
+          return { text: `# ${head}\n\n${r.text}${tail}${warn}${renderRelated(side.related)}` };
         }
         // ③ 日期 + 关键词
         const day = String(args?.day || '').trim();

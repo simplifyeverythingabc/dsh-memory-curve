@@ -31,6 +31,28 @@ export const COLD_AFTER_DAYS = 14;    // 超过这么久没被查过 -> cold
 export const ARCHIVE_BELOW_R = 0.12;  // 留存低于这个且从未被查 -> archived
 export const TS_KEEP = 24;            // 每个 id 保留的提取时间戳上限（FIFO）
 
+/**
+ * 提取诱发遗忘（retrieval-induced forgetting, 0.7.0）
+ *
+ * Anderson & Bjork 1994：**提取某条记忆会主动抑制与它竞争的那些**。
+ * 反复想起「A 方案」会让「B 方案」越来越难想起 —— 不是因为它衰减了，而是被压住了。
+ * 这是遗忘最反直觉的一层：记忆不是只增不减，想起一件事的代价是暂时想不起另一件。
+ *
+ * 插件这边对应的错：`touch()` 只给被查的加分，从不给相关条减分。结果是「查得越多，
+ * 什么都越牢」——那是数据库，不是记忆。
+ *
+ * 实现上有意做得很轻：
+ *   · 只抑制**与命中项共享实体**的竞争者（在 index.js 里挑，本模块只管记和算）
+ *   · 强度上限 0.35，**只影响排序 rank，不改 level** —— 被压住的仍然看得到，只是排后面
+ *   · 指数恢复，半衰期 6 小时：睡一觉就基本回来了
+ *
+ * 这条不写进「已修」清单的话很容易被误读成 bug（「我刚搜过这个，怎么那条掉下去了」）——
+ * 它就是要这样。
+ */
+export const SUPPRESS_HALF_LIFE_H = 6;
+export const SUPPRESS_MAX = 0.35;
+export const SUPPRESS_DEFAULT = 0.12;
+
 let cache = null;
 let cacheFile = null;
 
@@ -125,20 +147,57 @@ function mergeTs(records) {
   return out;
 }
 
-/** 算一个 id 集合的累计访问次数、最近提取时间与提取时间线 */
-export function sumAccess(file, ids) {
+/** 算某条记录此刻的残余抑制（指数恢复，半衰期 SUPPRESS_HALF_LIFE_H 小时） */
+export function suppressionOf(rec, now = Date.now()) {
+  if (!rec || !rec.sup || !rec.sup.at || !(rec.sup.amt > 0)) return 0;
+  const h = Math.max((now - rec.sup.at) / 3600000, 0);
+  return rec.sup.amt * Math.pow(0.5, h / SUPPRESS_HALF_LIFE_H);
+}
+
+/**
+ * 记一次抑制：把 ids 这批记录的「被压制程度」抬到 amount。
+ *
+ * 用 max 而不是累加：连着查 10 次同一件事，不该把竞争者埋进地心 —— 真实的 RIF
+ * 效应在几次重复后就饱和了。取 max 也让反复调用天然幂等。
+ */
+export function suppress(file, ids, amount = SUPPRESS_DEFAULT, now = Date.now()) {
+  if (!ids || !ids.length) return { suppressed: 0 };
+  const data = load(file);
+  let n = 0;
+  for (const id of ids) {
+    if (!id) continue;
+    const rec = data[id];
+    if (!rec) continue;                       // 没有记录的 id 不凭空造一条抑制
+    const cur = suppressionOf(rec, now);
+    rec.sup = { at: now, amt: Math.min(SUPPRESS_MAX, Math.max(cur, amount)) };
+    data[id] = rec;
+    n++;
+  }
+  if (n) flush(file, data);
+  return { suppressed: n };
+}
+
+/**
+ * 算一个 id 集合的累计访问次数、最近提取时间、提取时间线与**当前残余抑制**。
+ *
+ * 抑制取 max 而不是求和：一个事件的多个 id 都被压制时，压制程度取决于最强的那条。
+ */
+export function sumAccess(file, ids, now = Date.now()) {
   const data = load(file);
   let n = 0;
   let last = null;
+  let suppressAmt = 0;
   const recs = [];
   for (const id of ids || []) {
     const rec = data[id];
     if (!rec) continue;
     n += rec.n || 0;
     if (rec.last && (!last || rec.last > last)) last = rec.last;
+    const s = suppressionOf(rec, now);
+    if (s > suppressAmt) suppressAmt = s;
     recs.push(rec);
   }
-  return { n, last, ts: mergeTs(recs) };
+  return { n, last, ts: mergeTs(recs), suppress: suppressAmt };
 }
 
 /** 判定状态 */
