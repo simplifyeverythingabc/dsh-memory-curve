@@ -1142,7 +1142,11 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, max
     const flag = (g.openness || 0) >= 0.3 ? '▸' : '';
     // ~ = 记得模糊：confidence 低（留存差 + 没被提取过）。知道自己不确定，比假装确定有用 ——
     // 模型看到这个符号会去回查原文，而不是拿模糊的梗概当事实。
-    const fog = (g.confidence ?? 1) < 0.35 ? '~' : '';
+    //
+    // 阈值 0.25 是量出来的，不是拍的：真实数据里 confidence = 0.6·R + 0.4·practice，
+    // 0.35 会标掉 51/91（56%，L2 几乎全带 ~，符号就废了）；0.20 一个都不标（0%）；
+    // 0.25 标 6/91（7%），正好落在「少数真正模糊的」。
+    const fog = (g.confidence ?? 1) < 0.25 ? '~' : '';
     return `- ${flag}${fog}${ago(g.startAt)}(${md}) ${g.count}条　${title}`;
   };
 

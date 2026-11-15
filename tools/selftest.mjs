@@ -928,8 +928,8 @@ try {
       const cClear = gClear[0].confidence;
       if (!(cFog >= 0 && cFog <= 1 && cClear >= 0 && cClear <= 1)) {
         fail('元认知置信度', `超出 0~1：模糊 ${cFog}、清晰 ${cClear}`);
-      } else if (!(cFog < 0.35)) {
-        fail('元认知置信度', `30 天没查过的 confidence=${cFog}，应 <0.35（要标 ~）`);
+      } else if (!(cFog < 0.25)) {
+        fail('元认知置信度', `30 天没查过的 confidence=${cFog}，应 <0.25（要标 ~）`);
       } else if (!(cClear > 0.5)) {
         fail('元认知置信度', `1 小时前查过 10 次的 confidence=${cClear}，应 >0.5`);
       } else {
