@@ -1021,6 +1021,39 @@ try {
       } else {
         ok('语义降级', '模型不可达 → failed（不抛），调用方自动退回字符匹配');
       }
+
+      // 叙事重构（0.13.0）：纯算法，不调模型，所以断言也必须是纯函数的
+      const narrMod = await import('../src/narrate.js');
+      const mkNarr = (idx, head, openness, minute) => ({
+        day: '2026-02-01', startAt: NOW - 3600000 + minute * 60000, lastAt: NOW,
+        count: 5, S: 3, R: 0.5, level: 'L2', head, openness, ids: [`n${idx}`],
+      });
+      const narrEvs = [
+        mkNarr(0, '@C:\\Users\\x\\report.md', 0, 0),      // 路径开头，应被跳过
+        mkNarr(1, '开始排查构建失败', 0, 10),
+        mkNarr(2, '把缓存层换成惰性加载', 0.8, 20),        // 未完成，应成「还悬着」
+        mkNarr(3, '全部测试通过收工', 0, 30),
+      ];
+      const narrThreads = [
+        { label: 'build-fix', startAt: NOW - 3600000, lastAt: NOW, members: narrEvs.slice(1) },
+      ];
+      const narr = narrMod.narrateDay(narrEvs, narrThreads, '2026-02-01');
+      if (!narr) {
+        fail('叙事重构', '有事件却返回空串');
+      } else if (!narr.includes('4 件事')) {
+        fail('叙事重构', `没说出件数：${narr}`);
+      } else if (narr.includes('report.md')) {
+        fail('叙事重构', `路径标题没被跳过：${narr}`);
+      } else if (!narr.startsWith('那天') || !narr.endsWith('。')) {
+        fail('叙事重构', `格式不对：${narr}`);
+      } else if (!narr.includes('还悬着')) {
+        fail('叙事重构', `未完成项没提：${narr}`);
+      } else {
+        // 空天必须返回空串，不能返回「那天 0 件事」
+        const empty = narrMod.narrateDay(narrEvs, narrThreads, '2026-02-02');
+        if (empty !== '') fail('叙事重构', `无事件的天应返回空串，实得「${empty}」`);
+        else ok('叙事重构', `4 件事 → 一句连贯叙述（跳过路径标题、带未完成项）`);
+      }
     }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));

@@ -33,6 +33,7 @@ export const CODE_FILES = [
   'src/access.js',
   'src/paths.js',
   'src/embed.js',
+  'src/narrate.js',
   'tools/memory-notes.mjs',
   'tools/build-dailies.mjs',
   'tools/manifest.mjs',

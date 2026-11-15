@@ -38,6 +38,7 @@ import { resolveMemDir, dshHome, normalizeDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL, suppress, SUPPRESS_DEFAULT } from './access.js';
 import { createEmbedder, EMBED_MIRROR } from './embed.js';
+import { narrateDay } from './narrate.js';
 import { mountAutoCollector, writeAtomic } from './collector.js';
 
 export const name = 'memory-curve';
@@ -849,12 +850,24 @@ export function apply(ctx, config = {}) {
           return { text: `日期要写成 YYYY-MM-DD（收到 ${JSON.stringify(day)}），例如 2026-11-09` };
         }
         const t = readDigest({ digestDir: digestDir(), day });
-        if (t) return { text: t };
+        // 一句话回顾（0.13.0）：把当天的摘要「重述」成一段连贯的话，而不是罗列条目。
+        // 纯算法重组 —— 所有词都来自真实字段，一个都不编（见 narrate.js 的注释）。
+        const withNarr = (txt) => {
+          if (!txt) return txt;
+          try {
+            const g = build();
+            const n = narrateDay(g.graded, clusterThreads(), day);
+            return n ? `${txt}\n\n【一句话回顾】\n${n}` : txt;
+          } catch {
+            return txt;                     // 重构失败不能拖累摘要本身
+          }
+        };
+        if (t) return { text: withNarr(t) };
         // 摘要没生成过就现做 —— 只补这一天。不传 days 会把全部日子的摘要
         // 重算一遍（全量聚类 + 全量写盘），查一个不存在的日期就白烧一次。
         try { buildDailies({ memDir: memDir(), digestDir: digestDir(), days: [day] }); } catch {}
         const t2 = readDigest({ digestDir: digestDir(), day });
-        return { text: t2 || `没有 ${day} 的摘要。可用 memory_curve_days 看有哪些天。` };
+        return { text: withNarr(t2) || `没有 ${day} 的摘要。可用 memory_curve_days 看有哪些天。` };
       },
       presentCall: (a) => ({ card: 'generic', title: '查摘要', kind: 'other', rawInput: a?.day || '' }),
     }));
