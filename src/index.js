@@ -280,7 +280,7 @@ function build(now = Date.now()) {
 export function report(graded) {
   const L = ['# 事件分级（遗忘曲线）', '',
     `> 生成 ${fmtYMD(Date.now())}　事件 ${graded.length} 个`, '',
-    '> `S = ln(1+条数)×(1+0.35·ln(1+跨度天数))×(1+密度/60)×提取×间隔×显著`', '',
+    '> `S = ln(1+条数)×(1+0.35·ln(1+跨度天数))×(1+密度/60)×提取×间隔×显著×未完成`', '',
     '> `R = (1 + 6.39·距今小时÷(S×24))^-0.5`　（幂律，长尾比指数更厚）', '',
     '> 距今从「最近一次活动」与「最近一次被提取」里取更晚的那个 —— 提取即再巩固', '',
     '> 等级按绝对阈值 + 相对配额两道闸：L1≤10%、L2≤22%、L3≤25%，超出降级（标 ↓）', '',
@@ -676,8 +676,14 @@ export function apply(ctx, config = {}) {
             } else {
               // expandRange 会对真正的区间抛错（内容哈希无法展开），
               // 这里转成给人看的提示，不让它冒到工具层当异常。
-              try { ids = ids.concat(expandRange(s2)); }
-              catch (e) { errs.push(`跳过 ${s2}：${e?.message ?? e}`); }
+              let add = [];
+              try { add = expandRange(s2); }
+              catch (e) { errs.push(`跳过 ${s2}：${e?.message ?? e}`); add = null; }
+              // expandRange 对「格式就不对」的串不抛错，直接返回空数组（'bad'、'm_abc'、
+              // 抄错的哈希、空串都走这条）。不单独记一笔的话，混在批次里的手误 id
+              // 既取不到内容、也不进「已跳过 N 项」，用户完全无感。
+              if (add && !add.length && s2) errs.push(`无法识别的 id：${s2}`);
+              if (add) ids = ids.concat(add);
             }
           }
           // 一条都没解析出来时，把错误原样给人看，别退化成「范围内没命中」

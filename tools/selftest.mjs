@@ -779,6 +779,16 @@ try {
     else if (!rp.includes('蔡0.8')) fail('报告蔡加尼克列', '已收尾（<1）的扣分被当成「无修正」漏掉了');
     else ok('报告蔡加尼克列', '1.2 与 0.8 都显示（用绝对值判断）');
 
+    // 公式头必须列全 S 的每一个乘数。
+    // 0.5.5 的现场矛盾：修正列会打印「蔡1.25」，而同一份报告上方那行 S 公式只写了
+    // 六项、没有蔡加尼克 —— 表格里出现了一个公式里不存在的因子。这种漂移只看文档
+    // 是发现不了的，得有断言钉住。
+    const formulaLine = rp.split('\n').find((l) => l.includes('S = ')) || '';
+    const missingFactor = ['提取', '间隔', '显著', '未完成'].filter((k) => !formulaLine.includes(k));
+    if (!formulaLine) fail('报告公式完整性', '报告里找不到 S 公式行');
+    else if (missingFactor.length) fail('报告公式完整性', `S 公式缺乘数：${missingFactor.join('、')}`);
+    else ok('报告公式完整性', 'S 公式列全了 提取/间隔/显著/未完成');
+
     // (3) 桶内排序要用 weight：同桶里 openness 高者在前
     const mkL1 = (idx, openness, count) => ({
       idx, level: 'L1', startAt: NOW - 3600000, count, S: 8, head: 'E' + idx, openness,
