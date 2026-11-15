@@ -914,6 +914,32 @@ try {
       } else {
         ok('提取权重', `搜 3 次=1.2 < 读 2 次=3.0（混合 ${nMixed}）；读原文更牢`);
       }
+
+      // 元认知置信度：老且从没被查过的必须低到会标 `~`，新且常查的必须高
+      const mkConf = (id) => ({
+        day: '2026-01-01', startAt: NOW - 30 * DAY, lastAt: NOW - 30 * DAY,
+        items: new Array(5).fill({}), texts: ['测试'], toks: new Set(['aa', 'bb']),
+        ids: [id], salience: 1, openness: 0,
+      });
+      evm.clearClusterCache();
+      const gFog = evm.gradeEvents([mkConf('fog1')], NOW, () => ({ n: 0, last: null, ts: [], suppress: 0 }));
+      const gClear = evm.gradeEvents([mkConf('clear1')], NOW, () => ({ n: 10, last: new Date(NOW - 3600000).toISOString(), ts: [], suppress: 0 }));
+      const cFog = gFog[0].confidence;
+      const cClear = gClear[0].confidence;
+      if (!(cFog >= 0 && cFog <= 1 && cClear >= 0 && cClear <= 1)) {
+        fail('元认知置信度', `超出 0~1：模糊 ${cFog}、清晰 ${cClear}`);
+      } else if (!(cFog < 0.35)) {
+        fail('元认知置信度', `30 天没查过的 confidence=${cFog}，应 <0.35（要标 ~）`);
+      } else if (!(cClear > 0.5)) {
+        fail('元认知置信度', `1 小时前查过 10 次的 confidence=${cClear}，应 >0.5`);
+      } else {
+        // 渲染层也要真的标出来
+        const fogTxt = evm.renderForPrompt(gFog, { maxL1: 5, maxL2: 0, maxL3: 0, maxThreads: 0, now: NOW });
+        const clearTxt = evm.renderForPrompt(gClear, { maxL1: 5, maxL2: 0, maxL3: 0, maxThreads: 0, now: NOW });
+        if (!/- [▸~]*~/.test(fogTxt)) fail('元认知置信度', `模糊事件没标 ~：${fogTxt.split('\n').pop()}`);
+        else if (/- [▸]*~/.test(clearTxt)) fail('元认知置信度', `清晰事件被误标 ~：${clearTxt.split('\n').pop()}`);
+        else ok('元认知置信度', `模糊 ${cFog}（标 ~）/ 清晰 ${cClear}（不标）`);
+      }
     }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));

@@ -960,6 +960,19 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
     const cons = consolidationOf(anchor, now);
     const R = Math.pow(1 + POWER_K * (ageH / (S * 24 * cons.factor)), -POWER_BETA);
 
+    // 元认知置信度（metacognition，0.10.0）
+    //
+    // 人不是只有「记得 / 不记得」两档 —— 还知道自己**有多确定**。有些记忆清晰到能复述
+    // 细节，有些只剩一个模糊轮廓（知道有这么件事，但说不清具体做了什么）。
+    // 插件以前只给一个 R，模型没法区分「这条我确定」和「这条我大概记得」。
+    //
+    // 两个来源：
+    //   recency   留存（R 高 = 还在），权重 0.6 —— 主要依据
+    //   practice  被提取过多少次（对数，5 次算满分），权重 0.4 —— 反复想起过的更可靠
+    // 从没被提取过、又放很久的，confidence 会很低 —— 那是「我以为我记得」。
+    const practice = Math.min(1, Math.log(1 + (acc.n || 0)) / Math.log(6));
+    const confidence = Math.max(0, Math.min(1, 0.6 * R + 0.4 * practice));
+
     // 主题词：取事件里 IDF 最高的几个（IDF 高 = 不常见 = 有辨识度）
     // 只依赖词集与 DF，与 now 无关 —— 走事件级缓存，不随每次工具调用重算。
     const scored = topicsOf(ev, df, N);
@@ -1009,6 +1022,8 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
       consolidation: Math.round(cons.factor * 1000) / 1000,
       // 系列位置：1.10（当天首尾）/ 1.05（次首尾）/ 1.0（中间或当天只有一条）
       serial,
+      // 元认知：0~1，越低越模糊。注入时低于 0.35 会标 `~`
+      confidence: Math.round(confidence * 1000) / 1000,
       topics: scored,
       head: head.slice(0, 90),
       tail: tail.slice(0, 90),
@@ -1125,7 +1140,10 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, max
     const title = (g.head || '').replace(/[`*#|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 42);
     // ▸ = 还没着落（蔡加尼克）：这类事最该被提起，也最容易被回想起
     const flag = (g.openness || 0) >= 0.3 ? '▸' : '';
-    return `- ${flag}${ago(g.startAt)}(${md}) ${g.count}条　${title}`;
+    // ~ = 记得模糊：confidence 低（留存差 + 没被提取过）。知道自己不确定，比假装确定有用 ——
+    // 模型看到这个符号会去回查原文，而不是拿模糊的梗概当事实。
+    const fog = (g.confidence ?? 1) < 0.35 ? '~' : '';
+    return `- ${flag}${fog}${ago(g.startAt)}(${md}) ${g.count}条　${title}`;
   };
 
   // 排序权重：未完成的事加权。人不是按「强度」回忆事情，而是按「还没解决」。
