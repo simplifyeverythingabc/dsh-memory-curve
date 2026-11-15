@@ -35,7 +35,34 @@
 
 ---
 
-## [0.6.0] - 2026-11-15
+## [0.6.1] - 2026-11-15
+
+0.6.0 上线后立刻暴露的两个真 bug。**持久化本身没问题，是有人绕过了它。**
+
+### 修复
+
+- **`buildDailies` 覆盖全局主题线状态**（严重）：`digest.js` 里调 `clusterEvents(entries)` **不带 labelStore**，而 `clusterEvents` 结尾无条件 `clusterState = {...}`。于是只要跑过一次 `buildDailies`（启动、`memory_curve_build`、自动采集的 `onDirty` 都会跑），`currentThreads()` 拿到的就是一份**没走持久化**的 threads —— 注入里的标签每轮都在变，而 `_threads.json` 一次都没被写过。
+  现场表现：一小时内 `headchars` → `tailchars` → `ef5aff9` 换了三次，文件 mtime 停在部署前。
+  修法：`clusterEvents` 加 `opts.setState`，`buildDailies` 传 `setState: false` —— 它只要事件来生成摘要，不要主题线。
+- **陈旧记录永不清理**：`saveThreadLabels` 原来只在 `dirty`（有新线）时写，且只保留 liveKeys。线会重组（起点合并/消失），那些记录不 dirty 却该被清掉；只按 dirty 判断的话它们会永远留着，文件越滚越大，而且**同名起点复用时还会捞到一个本该失效的旧名字**。
+  修法：判断条件改成「有新线 **或** 有陈旧记录」；`build()` 里无条件调一次。
+
+### 修正
+
+- `build()` 里写成了 `currentThreads()`，而 `index.js` 是把它作为别名 `clusterThreads` 导入的 —— 「别名导入却用原名」是个静默 ReferenceError，只有真正跑到那行才炸。`selftest` 里 `memory_curve_build` / `memory_curve_show` 两项当场红了。
+
+### 验证
+
+- **`selftest` 55 → 56 项**，新增「setState 隔离」：`clusterEvents(entries, { setState: false })` 不能改变 `currentThreads()` 的结果。
+- **端到端**（真实数据）：`build` → `buildDailies` → 再读，标签 `tenprotect|tailchars` 前后一致，污染=否。
+- **陈旧清理**：`_threads.json` 从 6 条（tenprotect / 0ff091a / mergeday / tailchars / inspect / unknown）清到 2 条（tenprotect / tailchars），4 条已消失的线被删掉。
+- 全套：`check` 16/0、`collector` 23/23、`selftest` 56/56、`bench` 33/33、`verify` 悬空引用 0。
+
+### 教训
+
+0.6.0 的单元测试全绿却线上失效，因为测的是「`linkThreads` 收到 store 会不会复用」，而真实路径上**有人把 store 换掉了**。加断言时必须覆盖「谁最后写了全局状态」，不然测的是实验室里的反应，不是产线上的。
+
+---## [0.6.0] - 2026-11-15
 
 主题线标签持久化 —— 把「成员稳了、名字还在漂」这个尾巴彻底收掉。
 

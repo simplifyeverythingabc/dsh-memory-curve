@@ -374,8 +374,13 @@ let clusterState = null;   // { entries, events }
 /** 把条目聚成事件（增量：复用未变化的前缀）
  *
  * @param {Array} entries readEntries 的结果
- * @param {{labelStore?: {map: Object, dirty: boolean}}} [opts]
+ * @param {{labelStore?: {map: Object, dirty: boolean}, setState?: boolean}} [opts]
  *        labelStore 是主题线标签仓库，由调用方持有并持久化。传 null 则每次现算。
+ *        setState=false 时**不改动全局 clusterState** —— 给「只要事件、不要主题线」的
+ *        调用方用（buildDailies 就是）：它那条路径没有 labelStore，若允许覆盖全局状态，
+ *        下一次 currentThreads() 拿到的就是一份没走持久化的 threads，注入里的标签
+ *        会跟着数据抖动。0.6.0 部署后现场就是这样：同一小时内 `headchars`→`tailchars`
+ *        →`ef5aff9` 换了三次，而 _threads.json 一次都没被写过。
  */
 export function clusterEvents(entries, opts = {}) {
   let p = 0;
@@ -465,7 +470,10 @@ export function clusterEvents(entries, opts = {}) {
   for (const ev of events) ev.entities = entitiesOf(ev, df, N);
   const threads = linkThreads(events, opts.labelStore || null);
 
-  clusterState = { entries, events, threads };
+  // setState=false：算完只把 events 交出去，不碰全局状态。
+  // 增量缓存也跟着不动 —— 否则下次 build() 会拿到一份「entries 是旧的、events 是新的」
+  // 的错配状态，前缀比较直接失效。
+  if (opts.setState !== false) clusterState = { entries, events, threads };
   return events;
 }
 

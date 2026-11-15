@@ -165,7 +165,11 @@ export function buildDailies(arg) {
   // 启动日志还会打出「事件 undefined」。
   if (!entries.length) return { written: [], total: 0, events: 0 };
 
-  const events = clusterEvents(entries);
+  // setState: false —— 这里只要事件来生成摘要，不要主题线。
+  // 不加这个参数的话会覆盖全局 clusterState，下一次 currentThreads() 拿到的就是一份
+  // 没走 _threads.json 持久化的 threads：注入里的标签会跟着数据抖（现场表现是
+  // headchars → tailchars → ef5aff9 一小时内换三次，而标签文件一次都没写过）。
+  const events = clusterEvents(entries, { setState: false });
   const graded = gradeEvents(events);
 
   // 补回 texts 与 toks（gradeEvents 只返回摘要字段，不含原文和词集）

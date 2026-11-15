@@ -776,6 +776,21 @@ try {
         if (!fresh.dirty || !keys) fail('标签持久化', '空仓库没有写入新标签');
         else ok('标签持久化', `${pinned.size} 条线全部复用（不重算、不标脏），空仓库首次写入 ${keys} 条`);
       }
+
+      // setState:false 不能污染全局主题线状态。
+      // 这是 0.6.0 上线后立刻暴露的 bug：buildDailies 里调 clusterEvents(entries) 不带
+      // labelStore，把全局 clusterState 换成了现算的 threads，于是注入里的标签每轮都在变，
+      // 而 _threads.json 一次都没被写过。
+      evm.clearClusterCache();
+      evm.clusterEvents(evm.readEntries(thDir), { labelStore: { map: {}, dirty: false } });
+      const beforeX = evm.currentThreads().map((t) => t.label).join('|');
+      evm.clusterEvents(evm.readEntries(thDir), { setState: false });
+      const afterX = evm.currentThreads().map((t) => t.label).join('|');
+      if (beforeX !== afterX) {
+        fail('setState 隔离', `setState:false 的调用污染了全局主题线：${beforeX} → ${afterX}`);
+      } else {
+        ok('setState 隔离', 'setState:false 不覆盖全局主题线状态');
+      }
     }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));

@@ -232,11 +232,16 @@ function loadThreadLabels() {
 /**
  * 写回标签仓库，只保留仍然存在的线。
  *
- * 线消失后它的标签没有复用价值 —— 留着只会让文件无限长下去（每条历史线一条记录）。
- * liveKeys 是本次算出的所有线的起点键。
+ * 触发条件有两个：有新线的标签要写（dirty），**或者**仓库里堆着已经不存在的线。
+ * 第二个条件不能省 —— 线会重组（起点合并/消失），那些记录不 dirty 却该被清掉；
+ * 只按 dirty 判断的话陈旧记录会永远留着，文件越滚越大，而且下次同名起点复用时
+ * 会捞到一个本该失效的旧名字。
  */
 function saveThreadLabels(store, liveKeys) {
-  if (!store || !store.dirty) return;
+  if (!store) return;
+  const live = new Set(liveKeys);
+  const stale = Object.keys(store.map).filter((k) => !live.has(k));
+  if (!store.dirty && !stale.length) return;      // 没新线、没陈旧 → 一个字节都不写
   const keep = {};
   for (const k of liveKeys) if (store.map[k]) keep[k] = store.map[k];
   try {
@@ -310,7 +315,8 @@ function build(now = Date.now()) {
     // 标签仓库：读一次 → 交给 cluster → 有新线就写回（并清掉已消失的线）
     const store = loadThreadLabels();
     const events = clusterEvents(entries, { labelStore: store });
-    if (store.dirty) saveThreadLabels(store, currentThreads().map((t) => String(t.startAt)));
+    // 无条件调一次：新线要写入，陈旧记录要清掉，两件事都在 saveThreadLabels 里判
+    saveThreadLabels(store, clusterThreads().map((t) => String(t.startAt)));
     cachedCluster = { fp, entries, events };
   }
   const { entries, events } = cachedCluster;
