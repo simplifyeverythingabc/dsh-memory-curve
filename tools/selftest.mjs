@@ -740,6 +740,43 @@ try {
     if (lostT > 0) fail('主题线稳定性', `追加无关消息后断掉 ${lostT} 条线`);
     else if (labelChanged > 0) fail('主题线稳定性', `追加无关消息后 ${labelChanged} 条线改了标签`);
     else ok('主题线稳定性', `追加无关消息后 ${before.length} 条线成员与标签均不变`);
+
+    // 标签持久化（0.6.0）：仓库里有名字就必须复用，不能再现算。
+    // 修之前的表现：成员一个没动，标签几小时内从 nativeauth 漂到 tenprotect。
+    evm.clearClusterCache();
+    evm.clusterEvents(evm.readEntries(thDir));
+    const th0 = evm.currentThreads();
+    if (!th0.length) {
+      fail('标签持久化', '夹具没产出主题线，无法验证');
+    } else {
+      // 夹具可能有多条线，必须**全部**预置 —— 只预置一条的话，缺记录的那条会现算
+      // 并标脏，那不是 bug 而是「新线首次出现」的正常行为。
+      const pinned = new Map();
+      const store = { map: {}, dirty: false };
+      th0.forEach((t, i) => {
+        const name = `固定名${i}`;
+        pinned.set(String(t.startAt), name);
+        store.map[String(t.startAt)] = { label: name, at: Date.now() };
+      });
+
+      evm.clearClusterCache();
+      evm.clusterEvents(evm.readEntries(thDir), { labelStore: store });
+      const th1 = evm.currentThreads();
+      const overwritten = th1.filter((t) => pinned.has(String(t.startAt)) && t.label !== pinned.get(String(t.startAt)));
+      if (overwritten.length) {
+        fail('标签持久化', `仓库里的名字被覆盖：期望「${pinned.get(String(overwritten[0].startAt))}」，实得「${overwritten[0].label}」`);
+      } else if (store.dirty) {
+        fail('标签持久化', '全部线都已预置却仍标脏，会白写文件');
+      } else {
+        // 反过来：空仓库必须写入新名字
+        const fresh = { map: {}, dirty: false };
+        evm.clearClusterCache();
+        evm.clusterEvents(evm.readEntries(thDir), { labelStore: fresh });
+        const keys = Object.keys(fresh.map).length;
+        if (!fresh.dirty || !keys) fail('标签持久化', '空仓库没有写入新标签');
+        else ok('标签持久化', `${pinned.size} 条线全部复用（不重算、不标脏），空仓库首次写入 ${keys} 条`);
+      }
+    }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));
   }

@@ -371,8 +371,13 @@ export function clearEntryCache() {
  */
 let clusterState = null;   // { entries, events }
 
-/** 把条目聚成事件（增量：复用未变化的前缀） */
-export function clusterEvents(entries) {
+/** 把条目聚成事件（增量：复用未变化的前缀）
+ *
+ * @param {Array} entries readEntries 的结果
+ * @param {{labelStore?: {map: Object, dirty: boolean}}} [opts]
+ *        labelStore 是主题线标签仓库，由调用方持有并持久化。传 null 则每次现算。
+ */
+export function clusterEvents(entries, opts = {}) {
   let p = 0;
   let reuse = 0;
   let prevEvents = null;
@@ -458,7 +463,7 @@ export function clusterEvents(entries) {
   // 这里算过就不会再遍历一遍 8 万个 token。
   const { df, N } = docFreq(events);
   for (const ev of events) ev.entities = entitiesOf(ev, df, N);
-  const threads = linkThreads(events);
+  const threads = linkThreads(events, opts.labelStore || null);
 
   clusterState = { entries, events, threads };
   return events;
@@ -540,12 +545,23 @@ export const THREAD_CROSS_DAY = 3;
  * 按「哪天哪条」，而是按「那条线」—— 「我在改这个插件」「发布链路那摊事」。
  * 0.4.x 的注入只是把事件按等级罗列，读起来更像日志而不是记忆。
  *
- * 用并查集：同天重合 >= 3 或跨天重合 >= 4 就并到一起。链式传递（A-B、B-C 但 A-C
+ * 用并查集：同天重合 >= 3 或跨天重合 >= 3 就并到一起。链式传递（A-B、B-C 但 A-C
  * 不重合）也算一条线 —— 真实的事情本来就是这样推进的。
  *
- * @returns {Array<{members, startAt, lastAt, items, openness, head, label, level}>}
+ * ── 标签持久化（0.6.0）────────────────────────────────────────────
+ * 标签以前每次现算，取「全体成员共享的最短实体」。成员里一旦掺进新事件，共享实体
+ * 集合就变，标签跟着换 —— 实测同一条线（成员一个没动）在几小时内从 `nativeauth`
+ * 变成 `tenprotect`。成员稳定了、标签还在漂，看的人会以为这是两件事。
+ *
+ * 现在给它一个**不随数据变化的身份**：线内最早事件的 startAt（毫秒）。只要这条线
+ * 的起点没变，就永远复用第一次算出来的标签。`labelStore` 由调用方持有并持久化到
+ * `_digest/_threads.json`，本函数只读写不落盘（events.js 不做 IO）。
+ *
+ * @param {Array} events 已带 entities 的事件
+ * @param {{map?: Object<string,string>, dirty?: boolean}|null} labelStore 标签仓库
+ * @returns {Array<{members, startAt, lastAt, items, openness, head, label, since}>}
  */
-export function linkThreads(events) {
+export function linkThreads(events, labelStore = null) {
   const n = events.length;
   const parent = new Array(n);
   for (let i = 0; i < n; i++) parent[i] = i;
@@ -606,37 +622,57 @@ export function linkThreads(events) {
     // 线的未完成度取成员最大值：线上只要有一件还没着落，这条线就是没完的事。
     // 用平均会被已完成的那几件稀释掉（实测 5 件里有 1 件开着，平均只剩 0.06）。
     const openness = Math.max(...members.map((m) => m.openness || 0));
+
+    // 线的身份 = 起点事件的毫秒时间戳。起点不变，标签就不变。
+    const storeKey = String(startAt);
     let label = '';
-    let common = null;
-    for (const t of members[0].entities) {
-      if (![...members].every((m) => m.entities.has(t))) continue;
-      // 全体共享的实体里取**最短**的，不是最长的。
-      // 取最长会系统性偏向底层实现名（makematcher / getboundingclientrect / toisostring），
-      // 那对「这条线在做什么」毫无说明力；短的那个通常才是主题词（publish / config）。
-      // 反正都过了「长度 >= 7 且是标识符」这道关，不会有 json/error 这种进来。
-      if (!common || t.length < common.length) common = t;
+    let since = 0;                       // 标签是哪一轮定下来的（0 = 本次新定）
+    const stored = labelStore && labelStore.map ? labelStore.map[storeKey] : null;
+    if (stored && typeof stored === 'object' && stored.label) {
+      label = stored.label;
+      since = stored.at || 0;
+    } else if (typeof stored === 'string' && stored) {
+      label = stored;                    // 兼容早期只存字符串的格式
     }
-    if (common) {
-      label = common;
-    } else {
-      // 没有全体共享的实体（链式相连的线本来就这样），退一步取「出现次数最多」的
-      // 实体 —— 它仍然是有辨识度的锚点。
-      // 最后才用首句：首句常常是半句话（「等一下，文件从…」），当标题很糟，
-      // 只在前两条路都走不通时兜底。
-      const cnt = new Map();
-      for (const m of members) for (const t of m.entities) cnt.set(t, (cnt.get(t) || 0) + 1);
-      let best = null;
-      let bestN = 1;
-      for (const [t, c] of cnt) {
-        if (c > bestN || (c === bestN && best && t.length > best.length)) { best = t; bestN = c; }
+
+    if (!label) {
+      let common = null;
+      for (const t of members[0].entities) {
+        if (![...members].every((m) => m.entities.has(t))) continue;
+        // 全体共享的实体里取**最短**的，不是最长的。
+        // 取最长会系统性偏向底层实现名（makematcher / getboundingclientrect / toisostring），
+        // 那对「这条线在做什么」毫无说明力；短的那个通常才是主题词（publish / config）。
+        // 反正都过了「长度 >= 7 且是标识符」这道关，不会有 json/error 这种进来。
+        if (!common || t.length < common.length) common = t;
       }
-      if (best) label = best;
-      else {
-        const first = members.slice().sort((a, b) => a.startAt - b.startAt)[0];
-        label = (first.texts && first.texts[0] ? first.texts[0] : '').replace(/[`*#|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 26);
+      if (common) {
+        label = common;
+      } else {
+        // 没有全体共享的实体（链式相连的线本来就这样），退一步取「出现次数最多」的
+        // 实体 —— 它仍然是有辨识度的锚点。
+        // 最后才用首句：首句常常是半句话（「等一下，文件从…」），当标题很糟，
+        // 只在前两条路都走不通时兜底。
+        const cnt = new Map();
+        for (const m of members) for (const t of m.entities) cnt.set(t, (cnt.get(t) || 0) + 1);
+        let best = null;
+        let bestN = 1;
+        for (const [t, c] of cnt) {
+          if (c > bestN || (c === bestN && best && t.length > best.length)) { best = t; bestN = c; }
+        }
+        if (best) label = best;
+        else {
+          const first = members.slice().sort((a, b) => a.startAt - b.startAt)[0];
+          label = (first.texts && first.texts[0] ? first.texts[0] : '').replace(/[`*#|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 26);
+        }
+      }
+      // 定下来就存住：下次成员再怎么变，这条线还叫这个名字。
+      if (labelStore && labelStore.map && label) {
+        labelStore.map[storeKey] = { label, at: Date.now() };
+        labelStore.dirty = true;
+        since = Date.now();
       }
     }
-    threads.push({ members, startAt, lastAt, items, openness, label });
+    threads.push({ members, startAt, lastAt, items, openness, label, since });
   }
   // 排前面的是「件数多、且最近还在动」的线 —— 那才是当下正在推进的事
   threads.sort((a, b) => (b.members.length - a.members.length) || (b.lastAt - a.lastAt));

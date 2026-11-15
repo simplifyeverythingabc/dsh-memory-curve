@@ -21,8 +21,8 @@
  *
  * 「遗忘」的动作：L4/L5 不进上下文，但文件照旧留着，需要时按上面那条链去翻。
  */
-import { existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 /**
  * schemastery 是 DSH 自带的包，宿主环境里必有。
  *
@@ -203,6 +203,51 @@ const memDir = () => {
 const digestDir = () => join(dshHome(), 'memory-notes', '_digest');
 const gradeFile = () => join(dshHome(), 'memory-notes', '_事件分级.md');
 const accessFile = () => join(dshHome(), 'memory-notes', '_access.json');
+// 主题线标签仓库。放 memory-notes 根而不是 _digest 里：_digest 是每日摘要，会被
+// 重算/清理；标签属于长期标识，不该跟着摘要一起没。
+const threadsFile = () => join(dshHome(), 'memory-notes', '_threads.json');
+
+/**
+ * 主题线标签仓库的读写。
+ *
+ * 为什么需要它：标签以前每次现算，取「全体成员共享的最短实体」。成员里一旦掺进
+ * 新事件，共享集合就变、标签跟着换 —— 实测同一条线（成员一个没动）几小时内从
+ * `nativeauth` 变成 `tenprotect`，看的人会以为是两件事。
+ *
+ * 现在线的身份是**起点事件的毫秒时间戳**：起点不变，标签永远复用第一次算出来的。
+ * 仓库挂在 memory-notes 根（不是 _digest：那边是每日摘要，会被重算/清理）。
+ *
+ * 读失败一律当空仓库 —— 标签丢了最多是重新算一次名字，不能让整个 build 挂掉。
+ */
+function loadThreadLabels() {
+  try {
+    const obj = JSON.parse(readFileSync(threadsFile(), 'utf8'));
+    const map = obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+    return { map, dirty: false };
+  } catch {
+    return { map: {}, dirty: false };
+  }
+}
+
+/**
+ * 写回标签仓库，只保留仍然存在的线。
+ *
+ * 线消失后它的标签没有复用价值 —— 留着只会让文件无限长下去（每条历史线一条记录）。
+ * liveKeys 是本次算出的所有线的起点键。
+ */
+function saveThreadLabels(store, liveKeys) {
+  if (!store || !store.dirty) return;
+  const keep = {};
+  for (const k of liveKeys) if (store.map[k]) keep[k] = store.map[k];
+  try {
+    mkdirSync(dirname(threadsFile()), { recursive: true });
+    writeFileSync(threadsFile(), JSON.stringify(keep), 'utf8');
+    store.map = keep;
+    store.dirty = false;
+  } catch {
+    // 写不进去就下次再说：本次渲染用的还是内存里那份，不影响结果
+  }
+}
 
 const MAX_L1 = 12, MAX_L2 = 20, MAX_L3 = 8, MAX_THREADS = 3, INDEX_DAYS = 10;
 
@@ -262,7 +307,11 @@ function build(now = Date.now()) {
 
   if (cachedCluster === null || cachedCluster.fp !== fp) {
     const entries = readEntries(dir);
-    cachedCluster = { fp, entries, events: clusterEvents(entries) };
+    // 标签仓库：读一次 → 交给 cluster → 有新线就写回（并清掉已消失的线）
+    const store = loadThreadLabels();
+    const events = clusterEvents(entries, { labelStore: store });
+    if (store.dirty) saveThreadLabels(store, currentThreads().map((t) => String(t.startAt)));
+    cachedCluster = { fp, entries, events };
   }
   const { entries, events } = cachedCluster;
   // 访问证据：这个事件下所有 id 的累计被查次数
