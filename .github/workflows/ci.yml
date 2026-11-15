@@ -83,56 +83,16 @@ jobs:
         with:
           node-version: '24'
 
-      # src/index.js 用的是静态 import '@deepseek-ai/schemastery'，
-      # 这个包只有 DSH 宿主里有。CI 里造一个最小 stub —— 只够让
-      # z.object/z.string/z.number/z.boolean 与 default/description/volatile/min/max 链式调用成立，不是真实现。
-      # 有了它，selftest 才能在干净环境里跑，把「接口形状对不对」纳入 CI。
+      # src/index.js 静态 import @deepseek-ai/schemastery，这个包只有 DSH 宿主里有。
+      # stub 由 tools/setup-dev.mjs 造 —— 不再在这里手写一份：两份副本一旦不同步，
+      # CI 绿而本地红（或反之），而这正是「同一件事多处各写一套」的老病。
       - name: 造 schemastery stub
-        run: |
-          mkdir -p node_modules/@deepseek-ai/schemastery
-          cat > node_modules/@deepseek-ai/schemastery/package.json <<'EOF'
-          {
-            "name": "@deepseek-ai/schemastery",
-            "version": "0.0.0",
-            "type": "module",
-            "main": "index.js"
-          }
-          EOF
-          cat > node_modules/@deepseek-ai/schemastery/index.js <<'EOF'
-          const mk = (type, meta = {}) => {
-            const fn = (v) => (v === undefined ? meta.default : v);
-            fn.type = type;
-            fn.meta = meta;
-            fn.dict = undefined;
-            fn.default = (d) => mk(type, { ...meta, default: d });
-            fn.description = (s) => mk(type, { ...meta, description: s });
-            fn.volatile = () => mk(type, { ...meta, volatile: true });
-            // 数值约束：真 schemastery 支持链式调用；stub 接受并记录元数据。
-            fn.min = (n) => mk(type, { ...meta, min: n });
-            fn.max = (n) => mk(type, { ...meta, max: n });
-            fn.toJSON = () => ({ type, meta });
-            return fn;
-          };
-          const z = {
-            string: () => mk('string'),
-            number: () => mk('number'),
-            boolean: () => mk('boolean'),
-            object: (dict) => {
-              const fn = (v) => v;
-              fn.type = 'object';
-              fn.meta = { default: {} };
-              fn.dict = dict;
-              fn.toJSON = () => ({ type: 'object', meta: fn.meta, dict });
-              return fn;
-            },
-          };
-          export default z;
-          EOF
+        run: node tools/setup-dev.mjs
 
       - name: 自动采集与故障恢复测试
         run: node --test tools/collector-test.mjs tools/collector-host-test.mjs
 
-      - name: 接口自检（30 项；Linux 29）
+      - name: 接口自检
         env:
           DSH_HOME: /tmp/dsh-home-ci
           MC_SELFTEST_ROOT: /tmp

@@ -15,33 +15,18 @@
 import { readFileSync, writeFileSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { EXPORT_FILES } from './manifest.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** 导出顺序：清单 → 配置 → 文档 → 源码 → 工具 → CI */
-const FILES = [
-  'package.json',
-  'cordis.patch.yml',
-  'README.md',
-  'CHANGELOG.md',
-  'LICENSE',
-  'src/index.js',
-  'src/events.js',
-  'src/digest.js',
-  'src/collector.js',
-  'src/access.js',
-  'src/paths.js',
-  'tools/memory-notes.mjs',
-  'tools/build-dailies.mjs',
-  'tools/export-code.mjs',
-  'tools/verify-ids.mjs',
-  'tools/collector-test.mjs',
-  'tools/collector-host-test.mjs',
-  'tools/selftest.mjs',
-  'tools/bench.mjs',
-  'tools/check.mjs',
-  '.github/workflows/ci.yml',
-];
+/**
+ * 要导出哪些文件来自 `tools/manifest.mjs`，**这里不再写第二份清单**。
+ *
+ * 0.5.6 加 `setup-dev.mjs` 时只补了 check.mjs 的 REQUIRED，忘了这里，于是导出的
+ * 《记忆插件完整代码.md》缺「怎么造 stub」那一节 —— 而 check 又要求那文件必须存在。
+ * 两份清单必然漂，所以收敛成一份：manifest 定义，check 与 export 都从它读。
+ */
+const FILES = EXPORT_FILES;
 
 const LANG = {
   '.js': 'js',

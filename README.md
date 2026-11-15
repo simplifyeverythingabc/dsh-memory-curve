@@ -497,7 +497,7 @@ node tools/selftest.mjs
 
 stub 必须使用 `export default z`，因为源码是 `import z from '@deepseek-ai/schemastery'`。不造 stub 直接跑，会得到 `Cannot find package '@deepseek-ai/schemastery'`；这是宿主 peer 还没接入，不是插件逻辑失败。
 
-自检会在临时目录造最小流水，检查 Config、disabled、自动采集配置、inject、apply、context、6 个工具、分级上限、`injectContext: false` 的拦截（context 与 variable 两组探针）和 disposer，共 30 项（Linux 因 UNC 路径断言跳过 1 项）。全过会打印 `✓ 全部通过 —— 干净环境可跑` 并返回 0。
+自检会在临时目录造最小流水，覆盖 Config、disabled、自动采集、inject/apply/context、6 个工具、分级上限、`injectContext: false` 的拦截（context 与 variable 两组探针）、增量聚类一致性、主题线稳定性与标签持久化、报告公式完整性。**具体项数不写在这里** —— 每加一条断言它就会过期，数字必然漂（这句以前写着「共 30 项」，实际早到了 56）。跑完看最后一行：全过会打印 `✓ 全部通过 —— 干净环境可跑` 并返回 0（Linux 因 UNC 路径断言跳过 1 项，仍算通过）。
 
 **临时目录不可写时**，指定一个可写位置：
 
@@ -642,14 +642,24 @@ node tools/bench.mjs
 ```
 dsh-memory-curve/
 ├── src/
-│   ├── index.js      插件入口：6 个工具 + context 注入
-│   ├── events.js     聚类、分级、打分、渲染
-│   ├── digest.js     搜索、排序、按 id 取文
-│   └── access.js     访问计数、冷热状态
+│   ├── index.js      插件入口：6 个工具 + context 注入 + 报告
+│   ├── events.js     聚类、分级、打分、主题线、渲染
+│   ├── digest.js     搜索、排序、按 id 取文、每日摘要
+│   ├── collector.js  会话日志采集（原子写 + 文件锁）
+│   ├── access.js     访问计数、提取时间线、冷热状态
+│   └── paths.js      记忆目录解析
 ├── tools/
-│   ├── memory-notes.mjs    会话日志 → 流水
-│   ├── build-dailies.mjs   流水 → 每日摘要
-│   └── verify-ids.mjs      完整性校验
+│   ├── memory-notes.mjs        会话日志 → 流水
+│   ├── build-dailies.mjs       流水 → 每日摘要
+│   ├── verify-ids.mjs          完整性校验（悬空引用）
+│   ├── check.mjs               语法 + 清单 + CHANGELOG 结构
+│   ├── selftest.mjs            接口自检（项数以它实际输出为准）
+│   ├── bench.mjs               检索基准
+│   ├── collector-test.mjs      采集器单测
+│   ├── collector-host-test.mjs 宿主事件形状单测
+│   ├── export-code.mjs         导出《记忆插件完整代码.md》
+│   ├── setup-dev.mjs           造 schemastery stub（本地与 CI 共用）
+│   └── manifest.mjs            仓库文件清单（check 与 export 共用一份）
 ├── cordis.patch.yml
 └── package.json
 ```

@@ -21,7 +21,7 @@
  *
  * 「遗忘」的动作：L4/L5 不进上下文，但文件照旧留着，需要时按上面那条链去翻。
  */
-import { existsSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 /**
  * schemastery 是 DSH 自带的包，宿主环境里必有。
@@ -246,7 +246,12 @@ function saveThreadLabels(store, liveKeys) {
   for (const k of liveKeys) if (store.map[k]) keep[k] = store.map[k];
   try {
     mkdirSync(dirname(threadsFile()), { recursive: true });
-    writeFileSync(threadsFile(), JSON.stringify(keep), 'utf8');
+    // 原子写：仓库里其它关键落盘（collector 的 writeAtomic）都是 tmp + rename。
+    // 这张表一旦崩在写一半，JSON 会被截断 → loadThreadLabels 按「读失败当空仓库」
+    // 处理 → 所有线重新起名一次 —— 恰好是 0.6.0 要消灭的那个症状。
+    const tmp = threadsFile() + '.tmp-' + process.pid;
+    writeFileSync(tmp, JSON.stringify(keep), 'utf8');
+    renameSync(tmp, threadsFile());
     store.map = keep;
     store.dirty = false;
   } catch {
@@ -460,7 +465,11 @@ export function apply(ctx, config = {}) {
   }
 
   const READ_TTL = 3000;
-  // 缓存键必须带上会影响渲染的四个配置值（全是 .volatile()，可以热改）。
+  // 缓存键带上会影响渲染的四个配置值。
+  // 注意：**只有 memoryDir 标了 .volatile()**，maxL1/maxL2/maxL3/maxThreads 都没有 ——
+  // 它们在 apply() 里被 num() 固化成常量，改了要重新 apply 才生效。
+  // 键里带上它们不是为了支持热改，而是避免同一进程内多套配置互相读到对方的旧文本
+  // （比如测试里换 config 重跑 apply）。
   // 只按时间缓存的话，3 秒内把 maxL1 从 12 改成 3 看不到任何变化，
   // 只有等采集器落盘触发 dropReadCache 才生效 —— 调参/测试时会以为「改了没反应」。
   const readKeyOf = () => `${maxL1}|${maxL2}|${maxL3}|${num(config.maxThreads, MAX_THREADS, 20)}`;

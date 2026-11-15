@@ -37,19 +37,26 @@ if (targets.length === 0) {
 
 // 只防「0 个文件」不够：目录改名、后缀改了，会扫到 1 个文件并全绿。
 // 断言几个必需文件在不在，比断言数字稳 —— 数字会过期，文件名不会。
-const REQUIRED = [
-  'src/index.js', 'src/events.js', 'src/digest.js', 'src/access.js', 'src/paths.js', 'src/collector.js',
-  'tools/collector-test.mjs', 'tools/collector-host-test.mjs',
-  'tools/check.mjs', 'tools/selftest.mjs', 'tools/verify-ids.mjs',
-  // build-dailies 比 bench 更核心：apply 启动时就会调 buildDailies，它坏了主链路掉一半
-  'tools/memory-notes.mjs', 'tools/build-dailies.mjs', 'tools/bench.mjs',
-  // 导出与开发环境补齐：两个都是「不做就没人做」的脚本，容易在重构里被删掉
-  // 而没人发现（export 的输出文档不进仓库，setup 的 stub 只在 node_modules 里）
-  'tools/export-code.mjs', 'tools/setup-dev.mjs',
-];
+//
+// 清单**不再写在这里**：`tools/manifest.mjs` 是唯一来源，export-code.mjs 也读同一份。
+// 0.5.6 加 setup-dev.mjs 时只改了这份、忘了导出那份，结果导出的完整代码文档里
+// 看不到「怎么造 stub」—— 同一件事两处各写一套，必然漂。
+import { CODE_FILES } from './manifest.mjs';
+const REQUIRED = CODE_FILES;
 const missing = REQUIRED.filter((r) => !targets.some((p) => p.replace(/\\/g, '/').endsWith(r)));
 if (missing.length) {
   console.error(`缺少必需文件，检查目录结构：${missing.join(', ')}`);
+  process.exit(1);
+}
+
+// 反向校验：src/ 与 tools/ 下每个 .js/.mjs 都必须在清单里。
+// 只验「清单里的文件存在」是不够的 —— 新增脚本忘登记时，这句照样绿，
+// 而导出文档会继续缺那个文件。真正要防的是「加了文件没登记」。
+const unlisted = targets
+  .map((p) => relative(root, p).replace(/\\/g, '/'))
+  .filter((rel) => !CODE_FILES.includes(rel));
+if (unlisted.length) {
+  console.error(`这些文件没有登记到 tools/manifest.mjs 的 CODE_FILES：${unlisted.join(', ')}`);
   process.exit(1);
 }
 

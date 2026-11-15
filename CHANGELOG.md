@@ -35,7 +35,47 @@
 
 ---
 
-## [0.6.1] - 2026-11-15
+## [0.6.2] - 2026-11-15
+
+第三轮审查的 11 条。**没有一条会算错数据**，但有一条值得单独说：`export-code` 的清单和 `check` 的必需清单又各写了一套 —— 这正是这个项目的老病根，0.5.6 加脚本时又复发了一处。
+
+### 根治（P0）
+
+- **两份文件清单收敛成一份**：新增 `tools/manifest.mjs`，定义 `CODE_FILES`（src 与 tools 下的全部源文件）与 `EXPORT_FILES`。`check.mjs` 的 REQUIRED 与 `export-code.mjs` 的 FILES **都从它读**，不再各写一套。
+  - 0.5.6 加 `setup-dev.mjs` 时只改了 check，忘了 export —— 导出的《记忆插件完整代码.md》里看不到「怎么造 stub」，而 check 又要求那文件必须存在。
+  - 顺手加了**反向校验**：`src/` 与 `tools/` 下每个 `.js/.mjs` 都必须在 `CODE_FILES` 里。只验「清单里的存在」不够 —— 新增脚本忘登记时 check 照样绿，导出继续缺。
+- **CI 不再手写 30 行 stub**：`ci.yml` 那段 `cat > node_modules/...` 换成 `node tools/setup-dev.mjs`。本地 `npm run setup` 跑一套、CI 跑另一套副本，一旦不同步就 CI 绿而本地红（或反之）。
+
+### 文档（P1）
+
+- **README 的 selftest 项数去掉**：原来写着「共 30 项」，实际早到了 56 —— 这个数字从 0.4.x 就没对过，两轮审查都提到。数字必然漂，改成「项数以实际输出为准」，只保留「全过会打印 ✓」。
+- **README 目录树补全**：原来 `src/` 缺 `collector.js`/`paths.js`，`tools/` 只列 3 个（实有 11 个）。照那棵树找 `selftest.mjs` 会找不到，而上一句正在讲 selftest。
+- **`linkThreads` 的 JSDoc 路径写错**：写着 `_digest/_threads.json`，实际在 `memory-notes/_threads.json`（`_digest` 是每日摘要，会被重算/清理）。
+- **`.volatile()` 的说法错了两处**：CHANGELOG 0.5.5 与 `index.js` 的缓存注释都说「maxL1/maxL2/maxL3/maxThreads 都是 `.volatile()` 可热改」。实际 Config 里**只有 `memoryDir` 标了**，那四个在 `apply()` 里被 `num()` 固化成常量，改了要重新 apply。缓存键带它们是为了避免同进程内多套配置互相读到旧文本，不是为了支持热改。
+
+### 代码（P2）
+
+- **`setState:false` 会原地改上一轮的 events**：复用是浅拷贝，新条目会就地并入 `cur`。`setState:false` 不重新赋值 `clusterState`，但对象已经被改 —— `clusterState.entries` 还是旧的、`events` 最后一个已多出若干条，两边对不上。当前没有代码在那之后读它，所以不炸，但这是**靠调用顺序站住的正确性**。改成在该路径下复制一个事件（低频路径，代价可忽略）。
+- **`_threads.json` 改原子写**：原来是裸 `writeFileSync`，崩在写一半会得到截断的 JSON → `loadThreadLabels` 按「读失败当空仓库」处理 → 所有线重新起名一次，**恰好是 0.6.0 要消灭的那个症状**。改成 tmp + rename，与 collector 的 `writeAtomic` 一致。
+
+### 测试
+
+- **`setState 隔离` 断言重写**：原来只验 threads 不变，抓不到事件对象被原地改。
+  - 第一版想用「追加文件」制造延长，实测**永远绿** —— 夹具里最后一条和追加内容的相似度不保证达到 join 阈值，`cur` 根本没被延长。
+  - 改成手工构造 entries：`arr2` 的前两个元素与 `arr1` 是同一批对象，前缀比较必然命中、第三个必然并入 `cur`。
+  - **反向验证过**：临时去掉复制，这条断言立刻红（`items 2 → 3`）；恢复后绿。
+- **`蔡加尼克加权` 补回传断言**：原来只比 S，把 `index.js` 里 `zeigarnik: Math.round(...)` 那行删掉照样绿 —— 而报告里的「蔡」列会静默消失（0.5.5 修的就是这个）。现在直接断言 `graded.zeigarnik` 为 1.2 / 0.8。
+- 删掉 `selftest.mjs` 里声明未使用的 `const fresh = mkEv('reb1', ...)`。
+
+### 验证
+
+`check` 17/0（新增 `manifest.mjs`）、`collector` 23/23、`selftest` 56/56、`bench` 33/33、`verify` 悬空引用 0。导出文档 23 个文件 / 7234 行 / 363 KB，`setup-dev.mjs` 与 `manifest.mjs` 都在。
+
+### 未动（记录在案）
+
+`clusterEvents` 的浅拷贝复用本身（本意如此，三条不变量已写进注释）；陈旧标签清理只认跨天线；`searchAll` 每 block×词重编正则；`buildDailies` 双遍历；bench 的「任一词 100%」是同义反复。
+
+---## [0.6.1] - 2026-11-15
 
 0.6.0 上线后立刻暴露的两个真 bug。**持久化本身没问题，是有人绕过了它。**
 
@@ -132,7 +172,7 @@
 
 ### 修复（一致性收尾）
 
-- **3 秒读缓存的键不含配置**：`maxL1/maxL2/maxL3/maxThreads` 都是 `.volatile()` 可热改，但缓存只按时间失效 —— 改完 3 秒内看不到变化，要等采集器落盘触发 `dropReadCache`。缓存键加上这四个值。
+- **3 秒读缓存的键不含配置**：`maxL1/maxL2/maxL3/maxThreads` 参与渲染，但缓存只按时间失效 —— 同一进程内换一套配置后 3 秒内仍会读到旧文本，要等采集器落盘触发 `dropReadCache`。缓存键加上这四个值。（注：这四个值**不是** `.volatile()`，只有 `memoryDir` 是；它们在 `apply()` 里被 `num()` 固化成常量，改了要重新 apply。）
 - **`maxThreads` 兼容通道能放大到 200**：schema 上限是 20，但 `num()` 统一钳到 200。`num()` 加 `cap` 参数，`maxThreads` 走 20；`renderForPrompt()` 自己也钳一次（它是公开 API，测试/外部直接调用时没有 schema 兜底）。
 - **`build()` 与 `renderForPrompt()` 各取一次 `Date.now()`**：跨午夜那一瞬间，分级算的「距今」和渲染算的「今天/昨天」会落在两天上。改成构建与渲染共用同一个 `now`。
 - **`check.mjs` 的 REQUIRED 缺两个新脚本**：补 `tools/export-code.mjs`、`tools/setup-dev.mjs` —— 这两个都是「不做就没人做」的脚本，删了不会有别的测试红。

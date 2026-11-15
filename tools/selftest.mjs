@@ -428,8 +428,7 @@ try {
       ids: [id], salience: 1,
     });
     const old = NOW - 12 * DAY;
-    const fresh = mkEv('reb1', old, ['排查连接池超时'], 3600000);
-    const gNone = ev.gradeEvents([mkEv('reb1', old, ['排查连接池超时'], 3600000)], NOW,
+        const gNone = ev.gradeEvents([mkEv('reb1', old, ['排查连接池超时'], 3600000)], NOW,
       () => ({ n: 0, last: null, ts: [] }));
     const gHit = ev.gradeEvents([mkEv('reb1', old, ['排查连接池超时'], 3600000)], NOW,
       () => ({ n: 3, last: iso(NOW - 60000), ts: [] }));
@@ -597,7 +596,13 @@ try {
     });
     const gz = evm.gradeEvents([mkZ('z1', 0.8), mkZ('z2', -0.8)], NOW);
     if (!(gz[0].S > gz[1].S)) fail('蔡加尼克加权', `未完成 S=${gz[0].S} 不高于已收尾 S=${gz[1].S}`);
-    else ok('蔡加尼克加权', `未完成 S=${gz[0].S} > 已收尾 S=${gz[1].S}`);
+    // 顺带断言乘数真的回传进了 graded：只比 S 的话，把 index.js 里
+    // `zeigarnik: Math.round(...)` 那行删掉，这条测试照样绿 —— 而报告里的「蔡」列
+    // 会静默消失（0.5.5 修的就是这个）。openness 0.8 → 1+0.25×0.8 = 1.2；-0.8 → 0.8。
+    else if (Math.abs((gz[0].zeigarnik ?? 0) - 1.2) > 1e-6 || Math.abs((gz[1].zeigarnik ?? 0) - 0.8) > 1e-6) {
+      fail('蔡加尼克回传', `graded.zeigarnik 不对：未完成 ${gz[0].zeigarnik}（应 1.2）、已收尾 ${gz[1].zeigarnik}（应 0.8）`);
+    }
+    else ok('蔡加尼克加权', `未完成 S=${gz[0].S}（蔡${gz[0].zeigarnik}） > 已收尾 S=${gz[1].S}（蔡${gz[1].zeigarnik}）`);
 
     // (3) 相对时间按日历日算：23:50 的事，凌晨 02:26 看必须是「昨天」不是「今天」
     const localNow = new Date(2026, 10, 15, 2, 26).getTime();
@@ -777,19 +782,36 @@ try {
         else ok('标签持久化', `${pinned.size} 条线全部复用（不重算、不标脏），空仓库首次写入 ${keys} 条`);
       }
 
-      // setState:false 不能污染全局主题线状态。
-      // 这是 0.6.0 上线后立刻暴露的 bug：buildDailies 里调 clusterEvents(entries) 不带
-      // labelStore，把全局 clusterState 换成了现算的 threads，于是注入里的标签每轮都在变，
-      // 而 _threads.json 一次都没被写过。
+      // setState:false 不能污染全局主题线，也不能原地改上一轮的 events 对象。
+      //
+      // 这条要用手工 entries 测，不能靠追加文件：夹具里最后一条和追加内容的相似度
+      // 不保证达到 join 阈值，一旦没并进去，cur 就不会被延长，断言永远绿（实测过一次）。
+      // 手工构造时 arr2 的前两个元素与 arr1 是**同一批对象**，前缀比较必然命中，
+      // 第三个元素必然并入 cur —— 复制漏了就会改到 arr1。
+      const tbase = new Date(2026, 3, 5, 10, 0).getTime();
+      const mkE = (n, at, text) => ({
+        day: '2026-04-05', hhmm: '10:00', who: '用户', at,
+        id: `m_20260405_00000${n}`, text,
+      });
+      const arr1 = [mkE(1, tbase, '排查连接池超时的问题'), mkE(2, tbase + 60000, '排查连接池超时')];
+
       evm.clearClusterCache();
-      evm.clusterEvents(evm.readEntries(thDir), { labelStore: { map: {}, dirty: false } });
-      const beforeX = evm.currentThreads().map((t) => t.label).join('|');
-      evm.clusterEvents(evm.readEntries(thDir), { setState: false });
-      const afterX = evm.currentThreads().map((t) => t.label).join('|');
-      if (beforeX !== afterX) {
-        fail('setState 隔离', `setState:false 的调用污染了全局主题线：${beforeX} → ${afterX}`);
+      const r1 = evm.clusterEvents(arr1);
+      const lenBefore = r1[r1.length - 1].items.length;
+      const threadsBefore = evm.currentThreads().map((t) => t.label).join('|');
+
+      const arr2 = [...arr1, mkE(3, tbase + 120000, '排查连接池超时的问题')];
+      evm.clusterEvents(arr2, { setState: false });
+
+      const lenAfter = r1[r1.length - 1].items.length;
+      const threadsAfter = evm.currentThreads().map((t) => t.label).join('|');
+
+      if (threadsBefore !== threadsAfter) {
+        fail('setState 隔离', `污染了全局主题线：${threadsBefore} → ${threadsAfter}`);
+      } else if (lenAfter !== lenBefore) {
+        fail('setState 隔离', `原地改了上一轮的 events 对象（items ${lenBefore} → ${lenAfter}）`);
       } else {
-        ok('setState 隔离', 'setState:false 不覆盖全局主题线状态');
+        ok('setState 隔离', `全局主题线未变，上一轮 events 未被原地延长（${lenBefore} 条不变）`);
       }
     }
   } catch (e) {

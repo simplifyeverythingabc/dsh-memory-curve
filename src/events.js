@@ -417,7 +417,21 @@ export function clusterEvents(entries, opts = {}) {
   const from = reuse > 0 ? prevEvents[reuse - 1].endIdx + 1 : 0;
   // cur 指向复用出来的最后一个事件：它还没封口，新条目仍可能并入它。
   // 这正是全量算法的状态，所以「继续跑」得到的结果与全量逐条一致。
-  let cur = events.length ? events[events.length - 1] : null;
+  //
+  // setState=false 时**必须复制一个**：复用的是上一轮 clusterState 里的同一批对象，
+  // 原地改 cur 的 items/texts/ids/toks 会同时改掉 clusterState.events 里的那个对象，
+  // 于是「只读调用」变成了「改了全局状态」—— clusterState.entries 还是旧的、
+  // events 最后一个已经多出若干条，两边对不上。当前没有代码在那之后读它，所以不炸；
+  // 但这是靠调用顺序站住的正确性，属于设计债。低频路径（buildDailies）多复制一个
+  // 事件，代价可以忽略。
+  let cur = null;
+  if (events.length) {
+    const last = events[events.length - 1];
+    cur = opts.setState === false
+      ? { ...last, items: [...last.items], texts: [...last.texts], ids: [...last.ids], toks: new Set(last.toks) }
+      : last;
+    events[events.length - 1] = cur;
+  }
 
   for (let i = from; i < entries.length; i++) {
     const e = entries[i];
@@ -563,7 +577,8 @@ export const THREAD_CROSS_DAY = 3;
  *
  * 现在给它一个**不随数据变化的身份**：线内最早事件的 startAt（毫秒）。只要这条线
  * 的起点没变，就永远复用第一次算出来的标签。`labelStore` 由调用方持有并持久化到
- * `_digest/_threads.json`，本函数只读写不落盘（events.js 不做 IO）。
+ * `<DSH_HOME>/memory-notes/_threads.json`（与 `_access.json` 同级，不是 `_digest` ——
+ * 那边是每日摘要会被重算/清理），本函数只读写不落盘（events.js 不做 IO）。
  *
  * @param {Array} events 已带 entities 的事件
  * @param {{map?: Object<string,string>, dirty?: boolean}|null} labelStore 标签仓库
