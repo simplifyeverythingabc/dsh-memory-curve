@@ -535,6 +535,11 @@ export function apply(ctx, config = {}) {
           console.log(`[memory-curve] 语义向量不可用（${embedder.error}），退回字符匹配`);
           return 0;
         }
+        // 关键：**必须先跑一次 build()**。apply() 是同步的，模型加载完成时
+        // cachedCluster 还是 null（build 还没被任何工具/注入触发过），
+        // 直接取 events 会拿到空数组，encode 返回 0，save 被跳过 ——
+        // 结果就是「模型就绪了但一条向量都没有」。0.12.0 第一版就是这么翻的。
+        try { build(); } catch { /* 建不出来就让后面按需编码 */ }
         const evs = (cachedCluster && cachedCluster.events) || [];
         return embedder.encode(
           evs.map((e) => ({ key: (e.ids && e.ids[0]) || '', text: (e.texts || []).join('\n') })),
