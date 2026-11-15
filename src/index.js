@@ -127,6 +127,13 @@ export const Config = z.object({
   collectFlushMs: z.number().min(100).max(60000).default(1500).description('消息批量落盘间隔（毫秒）。'),
   collectScanMs: z.number().min(1000).max(3600000).default(60000).description('日志增量补漏间隔（毫秒）；启动时也会补漏。'),
   collectSummaryMs: z.number().min(100).max(60000).default(5000).description('有变动时摘要合并刷新间隔（毫秒）。'),
+  // ── 语义向量（0.12.0 / 0.13.1 补声明）────────────────────────────
+  // 这两个字段 0.12.0 时**只在 apply() 里读、没在 Config 里声明**，而 schemastery 会把
+  // 未声明的字段丢掉 —— 于是 config.semanticRecall 永远是 undefined，
+  // `!== false` 恒真，语义功能根本关不掉；embedMirror 也永远拿不到配置值。
+  // 跟 0.4.x 那次「加了守卫但永远拿到 undefined」是同一类事故，只是这次是配置项。
+  semanticRecall: z.boolean().default(true).description('启用语义向量（bge-small-zh-v1.5，需装 @xenova/transformers）。关闭后只用实体指纹匹配，行为与 0.11.0 一致。'),
+  embedMirror: z.string().default('https://hf-mirror.com').description('模型下载镜像。墙外可改 https://huggingface.co。'),
 });
 
 
@@ -350,12 +357,17 @@ function build(now = Date.now()) {
  *   我第一版照常识拍了 0.55，结果 94.7% 的事件对都判成「相似」—— 等于没筛。
  *   0.85 落在 p99.5，命中 0.49%（65/13203），每个事件平均不到 1 个邻居，正好。
  *
- * SEM_MIN_CHARS = 12 —— 短文本在 bge 上会出荒谬的高分：
- *   实测「原版重签名跑满 60 秒：pid 5388 稳定」↔「好了没」余弦 0.919。
- *   剔除太短的文本比调阈值有效。
+ * SEM_MIN_CHARS —— 0.13.1 审计发现它**从来没触发过**。原来查的是 `texts.join('').length`
+ * （整个事件的全部文本），实测 164 个事件最小 37 字、中位 4402 字，`< 12` 的是 **0 个**。
+ *
+ * 而误判的来源恰好相反：是「长事件里夹了一句『好了没』」（实测余弦 0.919）——
+ * 整个事件的文本长度拦不住它。长度过滤解决不了这个问题，真正的护栏是 0.85 这个阈值
+ * 本身（65 对里只有 1 对是这种误报，1.5%，可接受）。
+ *
+ * 所以这个常量现在只做一件真事：拦住**没有任何文本可编码**的事件。阈值降到 1。
  */
 const SEM_THRESHOLD = 0.85;
-const SEM_MIN_CHARS = 12;
+const SEM_MIN_CHARS = 1;
 
 /**
  * 提取的两个副作用：抑制竞争者（RIF）+ 扩散激活的关联。

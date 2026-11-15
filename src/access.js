@@ -25,7 +25,7 @@
  * 而且这个模块不负责删，只负责标记。
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { dirname } from 'node:path';
 
 export const COLD_AFTER_DAYS = 14;    // 超过这么久没被查过 -> cold
 export const ARCHIVE_BELOW_R = 0.12;  // 留存低于这个且从未被查 -> archived

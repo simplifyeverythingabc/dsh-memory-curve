@@ -26,7 +26,7 @@
  * huggingface.co 在这台机器上 SSL 不通，hf-mirror.com 通。所以默认走镜像，
  * 但允许调用方覆盖（别人可能在墙外，或者有企业代理）。
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export const EMBED_MODEL = 'Xenova/bge-small-zh-v1.5';

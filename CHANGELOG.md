@@ -35,7 +35,54 @@
 
 ---
 
-## [0.13.0] - 2026-11-15
+## [0.13.1] - 2026-11-15
+
+**全量审计。三个发现，一个高危。**
+
+### 高危：`semanticRecall` / `embedMirror` 在 Config 里没声明
+
+`apply()` 读了 `config.semanticRecall` 和 `config.embedMirror`，但 `Config` 里**没这两个字段**。schemastery 会丢弃未声明字段，于是：
+
+- `config.semanticRecall` 永远是 `undefined` → `!== false` 恒真 → **语义功能根本关不掉**
+- `config.embedMirror` 永远拿不到配置值 → **镜像改不了**
+
+**跟 0.4.x 那次「加了守卫但永远拿到 undefined」是同一类事故**，只是这次是配置项不是守卫。
+
+修：两个字段补进 `Config`，`semanticRecall` 默认 `true`，`embedMirror` 默认 `https://hf-mirror.com`。
+
+### 中：`SEM_MIN_CHARS` 是死检查
+
+它查的是 `texts.join('').length`（**整个事件**的全部文本）。实测 164 个事件：最小 **37 字**、中位 **4402 字**，`< 12` 的是 **0 个** —— 从来触发不了。
+
+而误判的来源恰好相反：是「长事件里夹了一句『好了没』」（余弦 0.919），整段长度拦不住它。**长度过滤解决不了这个问题**，真正的护栏是 0.85 阈值本身（65 对里只有 1 对误报，1.5%）。
+
+修：阈值降到 1，只拦「完全没文本可编码」的事件，注释里写清楚它做不到什么。
+
+### 低：三个死 import
+
+`access.js` 的 `join`（0 处使用）、`digest.js` 的 `LEVEL_NAME`（只有 import 行）、`embed.js` 的 `existsSync`（同）。全部删除。
+
+### 审计覆盖到但没发现问题的
+
+| 项 | 结果 |
+|---|---|
+| 报告公式 vs 代码计算 | **完全一致**（S 的 8 项、R 的巩固项都对得上） |
+| 工具注册数 | 6 个（`days`/`search`/`day`/`raw`/`build`/`show`） |
+| 旧 `_access.json`（0.3.x 只有 n/last/first） | 完全兼容；touch 后时间线正确补齐；抑制正常 |
+| 坏 `_vectors.json`（6 种：空/坏 JSON/模型名错/维度错/vec:null/base64 乱码） | **全部静默降级为 0 条，一个都不抛** |
+| 坏 `labelStore` | 被吞住，正常成线 |
+| 空事件数组 / 单条 / 未来时间 / 时间倒挂 | 全部不崩；未来事件的 `R=1`（不 NaN） |
+| 10 万字符文本编码 | 正常截断 |
+| `afterRetrieval` 复杂度 | 100 事件 0.10ms / 500 事件 0.27ms / 1000 事件 **0.49ms**（线性，可接受） |
+| `_vectors.json` 加载 | 2-4 ms（436 KB / 162 条） |
+| 性能回归 | 冷启动 138ms / 稳态 **0.57ms**（与 0.8.0 持平） |
+| 魔法数字 | 全部是具名常量，无一散落 |
+
+### 验证
+
+`check` 19/0、`collector` 23/23、`selftest` 67/67、`bench` 33/33、`verify` 悬空引用 0。
+
+---## [0.13.0] - 2026-11-15
 
 **叙事重构：把一天的事重述成一句话，而不是罗列条目。**
 

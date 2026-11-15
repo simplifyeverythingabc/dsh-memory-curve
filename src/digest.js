@@ -12,7 +12,7 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { readEntries, clusterEvents, gradeEvents, LEVEL_NAME, EN_STOP, cleanLine } from './events.js';
+import { readEntries, clusterEvents, gradeEvents, EN_STOP, cleanLine } from './events.js';
 
 const MAX_EVENTS_PER_DAY = 14;   // 一天最多列这么多事件，超出只报数量
 const HEAD_CHARS = 60;
