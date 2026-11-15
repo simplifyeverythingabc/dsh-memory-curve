@@ -697,6 +697,21 @@ export function linkThreads(events, labelStore = null) {
     // 用平均会被已完成的那几件稀释掉（实测 5 件里有 1 件开着，平均只剩 0.06）。
     const openness = Math.max(...members.map((m) => m.openness || 0));
 
+    // ── 图式强度（schema strength，0.11.0）────────────────────────────
+    // 真实记忆是分层的：具体经历（事件）之上还有「图式」——反复出现的事情被抽成一套
+    // 剧本，之后再遇到类似的就不需要记住每个细节了（Bartlett 1932 的重构记忆）。
+    // 例如「每次发布都要跑一遍四套测试」这条规则，比「11-15 那天我跑了四套测试」
+    // 记得更久，也更该占据有限的注入空间。
+    //
+    // 结构项和事件强度同形，但**用成员总条数而不是成员个数** —— 用个数的话尺度会
+    // 比事件 S 小一个量级（5 件 → ln6=1.8，而 28 条消息的事件是 ln29=3.4），
+    // 阈值永远够不到。用总条数才可比。
+    const spanDays = Math.max(1, Math.round((lastAt - startAt) / 86400000) + 1);
+    const S_line = Math.log(1 + items) * (1 + 0.3 * Math.log(1 + spanDays));
+    // 打在每个成员上，供 gradeEvents 的 rank 使用（不改 level，只影响排位 ——
+    // 细节不该消失，只是让位）。
+    for (const m of members) m.threadS = S_line;
+
     // 线的身份 = 起点事件的毫秒时间戳。起点不变，标签就不变。
     const storeKey = String(startAt);
     let label = '';
@@ -1022,7 +1037,9 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
       consolidation: Math.round(cons.factor * 1000) / 1000,
       // 系列位置：1.10（当天首尾）/ 1.05（次首尾）/ 1.0（中间或当天只有一条）
       serial,
-      // 元认知：0~1，越低越模糊。注入时低于 0.35 会标 `~`
+      // 图式强度：这条事件所属主题线的 S_line。≥4 时成员让位给抽象（只影响 rank）。
+      threadS: Math.round((ev.threadS || 0) * 100) / 100,
+      // 元认知：0~1，越低越模糊。注入时低于 0.25 会标 `~`
       confidence: Math.round(confidence * 1000) / 1000,
       topics: scored,
       head: head.slice(0, 90),
@@ -1052,10 +1069,17 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
   // 单看 S 会让「很久以前连聊几小时」霸榜，单看 R 会让「刚才说了句废话」进核心。
   // 单看 S 会让「很久以前连聊几小时」霸榜，单看 R 会让「刚才说了句废话」进核心。
   // 再乘 (1 - suppress)：被别的提取压住的那批往后排（retrieval-induced forgetting）。
-  // 注意抑制**只进 rank，不进 level** —— 绝对阈值那道闸不认它，所以被压住的仍在原来的
-  // 等级里，只是配额竞争时排在后面。把它做进 level 会让「搜过 A 之后 B 突然消失」，
-  // 那是 bug 体验，不是记忆。
-  const rank = (g) => g.R * Math.log(1 + g.S) * (1 - (g.suppress || 0));
+  // 再乘 schema：强图式的成员让位给抽象（细节不消失，只是排后面）。
+  //
+  // 三个乘数都**只进 rank，不进 level** —— 绝对阈值那道闸不认它们，所以被压的、
+  // 被让位的仍在原来的等级里。做进 level 会让「搜过 A 之后 B 突然消失」或
+  // 「沉淀成规则之后细节集体降级」，那是 bug 体验不是记忆。
+  const SCHEMA_DEMOTE_AT = 4;         // S_line ≥ 4 视为成形（实测 2 件 56 条 = 4.88）
+  const SCHEMA_DEMOTE_TO = 0.85;
+  const rank = (g) => {
+    const schema = (g.threadS || 0) >= SCHEMA_DEMOTE_AT ? SCHEMA_DEMOTE_TO : 1;
+    return g.R * Math.log(1 + g.S) * (1 - (g.suppress || 0)) * schema;
+  };
 
   // ── 第二道闸：相对配额 ───────────────────────────────────────────────
   // 纯绝对阈值有个结构性毛病：总量越大，够到阈值的事件越多，L1 从 19 涨到 20 再涨

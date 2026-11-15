@@ -940,6 +940,35 @@ try {
         else if (/- [▸]*~/.test(clearTxt)) fail('元认知置信度', `清晰事件被误标 ~：${clearTxt.split('\n').pop()}`);
         else ok('元认知置信度', `模糊 ${cFog}（标 ~）/ 清晰 ${cClear}（不标）`);
       }
+
+      // 图式强度：必须用**成员总条数**而不是成员个数。
+      // 用个数的话 2 件的事件线只有 ln3=1.1，比 28 条消息的事件（ln29=3.4）小一个量级，
+      // 阈值永远够不到 —— 这个错我第一版就犯了。
+      const mkSchemaEv = (id, startAt, ents) => ({
+        day: '2026-01-01', startAt, lastAt: startAt + 28 * 60000,
+        items: new Array(28).fill({}), texts: [id], toks: new Set(['aa', 'bb']),
+        ids: [id], entities: new Set(ents), openness: 0,
+      });
+      const schEvents = [
+        mkSchemaEv('s1', NOW - 10 * DAY, ['e1', 'e2', 'e3', 'e4']),
+        mkSchemaEv('s2', NOW - 1 * DAY, ['e1', 'e2', 'e3', 'e4']),
+      ];
+      const schThreads = evm.linkThreads(schEvents);
+      const sLine = schEvents[0].threadS;
+      if (!schThreads.length) {
+        fail('图式强度', '两件共享 4 个实体的事件没成线');
+      } else if (!(sLine > 4)) {
+        fail('图式强度', `2 件 56 条应得 S_line >4（用总条数），实得 ${sLine}`);
+      } else {
+        // 回传进 graded，且 level 不受影响
+        evm.clearClusterCache();
+        const gS = evm.gradeEvents(schEvents.map((e) => ({ ...e, items: [...e.items] })), NOW, () => ({ n: 0, last: null, ts: [], suppress: 0 }));
+        if (!(gS[0].threadS > 4)) {
+          fail('图式强度', `threadS 没回传进 graded：${gS[0].threadS}`);
+        } else {
+          ok('图式强度', `2 件 56 条 → S_line=${sLine.toFixed(2)}（≥4 让位），threadS 已回传`);
+        }
+      }
     }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));
