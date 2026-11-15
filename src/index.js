@@ -379,44 +379,63 @@ export function afterRetrieval(touchedIds, limit = 3, evsIn = null) {
   const hit = evs.filter((e) => (e.ids || []).some((id) => touched.has(id)));
   if (!hit.length) return empty;
 
-  // 候选：语义优先，字符兜底。
+  // 候选：**字符和语义两套都跑，合并去重**。
   //
-  // 语义可用时用余弦 ≥0.55（实测：近义「排查连接池超时」vs「maxWait 超时了」0.84，
-  // 无关 0.29，0.55 落在干净的空当里）。它能把「同一个意思、不同用词」认出来——
-  // 这是字符匹配永远做不到的。
+  // 0.12.0 第一版写的是 `if (semantic) {...} else {...}` —— 互斥。结果语义一开，
+  // 字符层面明明有 9 个共享实体的邻居也看不见了（那条语义只到 0.7 出头，够不到
+  // 0.85）。两套判据抓的是不同的东西：字符抓「同一个文件/函数/报错反复出现」，
+  // 语义抓「同一件事换了个说法」。少任何一边都是丢信息。
   //
-  // 语义不可用（模型没加载完 / 没装 / 没网）时**原样退回实体指纹**：共享 ≥2 个标识符。
-  // 两套的判据完全不同，所以下面把「为什么算相关」一起带出去（sem 标记），
-  // 渲染时一个说「共享 N 个线索」、一个说「语义相近 N%」，不混着讲。
+  // 合并规则：同一个事件两边都命中时，按各自尺度都留一条判据（sem 标记决定文案），
+  // 排序用「先语义后字符」的偏序 —— 语义命中通常更难得，优先展示。
   const scored = [];
+  const seen = new Map();
+
+  // ① 字符：共享 ≥2 个实体指纹（主题线用 3，这里更松，检索时的「顺带想起」本来就该松）
+  for (const e of evs) {
+    if (hit.includes(e) || !e.entities || !e.entities.size) continue;
+    let shared = 0;
+    for (const t of hit) {
+      if (!t.entities) continue;
+      for (const x of t.entities) if (e.entities.has(x)) shared++;
+    }
+    if (shared >= 2) {
+      const rec = { ev: e, score: shared, sem: false };
+      scored.push(rec);
+      seen.set(e, rec);
+    }
+  }
+
+  // ② 语义：余弦 ≥0.85（实测 p99.5）+ 排除过短文本
   const semantic = !!(embedder && embedder.status === 'ready' && embedder.size > 0);
   if (semantic) {
     const hitKeys = hit.map((t) => (t.ids && t.ids[0]) || '').filter(Boolean);
     for (const e of evs) {
       const ek = (e.ids && e.ids[0]) || '';
       if (hit.includes(e) || !ek) continue;
+      if ((e.texts || []).join('').length < SEM_MIN_CHARS) continue;
       let best = null;
       for (const hk of hitKeys) {
         const s = embedder.sim(hk, ek);
         if (s !== null && (best === null || s > best)) best = s;
       }
-      if (best !== null && best >= SEM_THRESHOLD && (e.texts || []).join('').length >= SEM_MIN_CHARS) {
-          scored.push({ ev: e, score: best, sem: true });
-        }
-    }
-  } else {
-    for (const e of evs) {
-      if (hit.includes(e) || !e.entities || !e.entities.size) continue;
-      let shared = 0;
-      for (const t of hit) {
-        if (!t.entities) continue;
-        for (const x of t.entities) if (e.entities.has(x)) shared++;
+      if (best === null || best < SEM_THRESHOLD) continue;
+      const prev = seen.get(e);
+      if (prev) {
+        // 两边都命中：保留语义这条（信息量更大），但记下字符共享数备查
+        prev.sem = true;
+        prev.score = Math.max(prev.score, best);
+      } else {
+        const rec = { ev: e, score: best, sem: true };
+        scored.push(rec);
+        seen.set(e, rec);
       }
-      if (shared >= 2) scored.push({ ev: e, score: shared, sem: false });
     }
   }
+
   if (!scored.length) return empty;
-  scored.sort((a, b) => b.score - a.score);
+  // 语义优先（它的尺度是 0..1，字符是整数，不能直接比大小）
+  scored.sort((a, b) => (b.sem ? 1 : 0) - (a.sem ? 1 : 0) || b.score - a.score);
   const top = scored.slice(0, limit);
 
   const sup = suppress(accessFile(), top.flatMap((x) => x.ev.ids || []), SUPPRESS_DEFAULT);
