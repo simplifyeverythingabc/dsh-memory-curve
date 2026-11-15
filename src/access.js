@@ -82,11 +82,24 @@ function flush(file, data) {
   }
 }
 
-/** 记一次访问：n 自增、last 更新、时间戳入序列 */
-export function touch(file, ids, query = '') {
+/**
+ * 记一次访问：n 按权重累加、last 更新、时间戳入序列。
+ *
+ * `weight` 是 0.9.0 加的：**主动回忆与被动查看的巩固效果差很多**。
+ * Roediger & Karpicke 2006 的 testing effect —— 真正把内容从记忆里**取出来**（读原文、
+ * 复述），比只是**再看到一遍**（扫到摘要里的一行）强得多。前者是提取练习，后者近乎重读。
+ *
+ *   读原文（memory_curve_raw）    weight 1.5  ← 完整提取，最强巩固
+ *   搜到摘要（memory_search）     weight 0.4  ← 只看到片段，弱提取
+ *
+ * n 因此可能不是整数，`retrieval = 1 + 0.18·ln(1+n)` 对浮点没有意见。
+ * 老的整数记录原样兼容（累加即可）。
+ */
+export function touch(file, ids, query = '', weight = 1) {
   if (!ids || !ids.length) return { touched: 0 };
   const data = load(file);
   const now = new Date().toISOString();
+  const w = Number.isFinite(weight) && weight > 0 ? weight : 1;
   let touched = 0;
   for (const id of ids) {
     if (!id) continue;
@@ -96,7 +109,7 @@ export function touch(file, ids, query = '') {
     // 没有 ts）拿到空种子，只剩本次一个点，mergeTs 不足两点、spacingOf 一律返回 1 ——
     // 0.3.x 存量数据的间隔效应永久失效，而且不报错。
     const prevLast = rec.last;
-    rec.n += 1;
+    rec.n = (rec.n || 0) + w;
     rec.last = now;
     if (query) rec.q = String(query).slice(0, 60);
     if (!Array.isArray(rec.ts)) rec.ts = prevLast ? [prevLast] : [];

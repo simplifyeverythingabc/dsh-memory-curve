@@ -690,7 +690,18 @@ export function apply(ctx, config = {}) {
     } catch { /* 状态取不到就不降权，不影响搜索 */ }
 
     const r = searchAll({ memDir: memDir(), pattern: pat, maxHits, digestDir: digestDir(), stateMap });
-        if (!r.total) return { text: `没搜到「${pat}」` };
+
+    // 搜索命中 = **弱提取**：看到了摘要片段，但没有完整回忆。给 0.4 的权重
+    // （读原文是 1.5，见 access.js 的 touch 注释）。
+    //
+    // 以前 search 完全不记访问 —— 等于「搜到过」对记忆强度毫无影响，那不是记忆。
+    // 但也不能给满分：扫到一行摘要和真把原文读出来，巩固效果差一个量级
+    // （testing effect：提取练习 vs 重读）。
+    if (r.total) {
+      const seenIds = [...new Set((r.hits || []).flatMap((h) => h.ids || []))];
+      if (seenIds.length) touch(accessFile(), seenIds, 'search:' + pat, 0.4);
+    }
+    if (!r.total) return { text: `没搜到「${pat}」` };
         const lines = r.hits.map((h) => {
           const first = h.ids[0], last = h.ids[h.ids.length - 1];
           const ids = first === last ? first : `${first}..${last}`;
@@ -774,7 +785,7 @@ export function apply(ctx, config = {}) {
           const id = args.id.trim();
           const one = readById({ memDir: memDir(), id });
           if (!one) return { text: `没有 id ${id}，检查是不是抄错了` };
-          touch(accessFile(), [id], 'raw:id');
+          touch(accessFile(), [id], 'raw:id', 1.5);
           // 读原文 = 真正的「提取」。这一步的副作用是双向的：压住竞争者（RIF）、带出关联。
           const side = afterRetrieval([id]);
           return { text: `# ${one.id}　${one.day}\n\n${one.text}${renderRelated(side.related)}` };
@@ -832,7 +843,7 @@ export function apply(ctx, config = {}) {
           // pool 里夹着缺失 id 时，被记成「查过」的是缺失项，真正返回的后一条没记，
           // 截断时（found < pool.length）同样错位。readByIds 现在把实际取到的 id 回传。
           const picked = [...new Set(r.picked)];
-          touch(accessFile(), picked, 'raw:ids');
+          touch(accessFile(), picked, 'raw:ids', 1.5);
           const side = afterRetrieval(picked);
           const head = pat ? `范围内命中 ${pool.length}/${ids.length} 条` : `共 ${r.total} 条`;
           const tail = r.found < r.total ? `\n\n（本次只取到 ${r.found} 条，受 maxChars=${maxChars} 限制；要更多就加大 maxChars 或用 pattern 缩小）` : '';
@@ -846,7 +857,7 @@ export function apply(ctx, config = {}) {
         // 按关键词模糊查也记访问：命中的条目算被用过
         try {
           const hitIds = [...r.text.matchAll(/m_[0-9]{8}_[0-9a-f]{6}/g)].map((x) => x[0]);
-          if (hitIds.length) touch(accessFile(), [...new Set(hitIds)], 'raw:day:' + (args?.pattern || ''));
+          if (hitIds.length) touch(accessFile(), [...new Set(hitIds)], 'raw:day:' + (args?.pattern || ''), 1.5);
         } catch {}
         return { text: `# ${day}　命中 ${r.total} 条\n\n${r.text}` };
       },

@@ -896,6 +896,24 @@ try {
       } else {
         ok('唤醒倒U', `峰值 ${peakEv.salience}(p${Math.round(peakEv.sigDensity)}）→ 极端回落到 ${lastEv.salience}`);
       }
+
+      // 主动回忆 vs 被动查看（testing effect）：
+      // 读原文 1.5 / 搜到摘要 0.4。读两次必须比搜三次更牢。
+      const wtFile = join(root, 'weight-math.json');
+      const wid = 'm_w_000001';
+      for (let i = 0; i < 3; i++) accSup.touch(wtFile, [wid], 'search', 0.4);
+      const nSearchOnly = accSup.stats(wtFile, wid).n;
+      for (let i = 0; i < 2; i++) accSup.touch(wtFile, [wid], 'raw', 1.5);
+      const nMixed = accSup.stats(wtFile, wid).n;
+      if (Math.abs(nSearchOnly - 1.2) > 1e-9) {
+        fail('提取权重', `3 次搜索(0.4) 应得 n=1.2，实得 ${nSearchOnly}`);
+      } else if (Math.abs(nMixed - 4.2) > 1e-9) {
+        fail('提取权重', `再加 2 次读原文(1.5) 应得 n=4.2，实得 ${nMixed}`);
+      } else if (!(3.0 > 1.2)) {
+        fail('提取权重', '读两次的加权次数没有高于搜三次');
+      } else {
+        ok('提取权重', `搜 3 次=1.2 < 读 2 次=3.0（混合 ${nMixed}）；读原文更牢`);
+      }
     }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));
