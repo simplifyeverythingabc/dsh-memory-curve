@@ -709,6 +709,35 @@ try {
       if (!on.includes('主题线')) fail('主题线开关', 'maxThreads=2 没注入主题线段');
       else ok('主题线开关', 'maxThreads=0 关闭 / =2 正常注入');
     }
+
+    // 稳定性：追加无关消息后，线不能重排、标签不能变
+    //
+    // 这是 0.5.2 的真实 bug：实体按 df 挑，新消息一进来 df 就变，每个事件选中的实体
+    // 跟着换，交集跌破阈值就断线。实测同一段历史在两条消息之间从「publish/5件」变成
+    // 「parsedaylog/2件」，标签一小时内换了三次。
+    const snapThreads = () => {
+      evm.clearEntryCache();
+      evm.clearClusterCache();
+      const e2 = evm.clusterEvents(evm.readEntries(thDir));
+      return evm.currentThreads().map((t) => ({
+        label: t.label,
+        key: t.members.map((m) => m.day + ':' + m.startAt).sort().join('|'),
+      }));
+    };
+    const before = snapThreads();
+    appendFileSync(join(thDir, '2026-04-04.md'),
+      '2026-04-04 21:00 ［用户］ <!-- m_20260404_999901 -->\n今天随便聊两句，跟上面都没关系。\n', 'utf8');
+    const after = snapThreads();
+    const beforeKeys = new Set(before.map((t) => t.key));
+    const afterKeys = new Set(after.map((t) => t.key));
+    const lostT = [...beforeKeys].filter((k) => !afterKeys.has(k)).length;
+    const labelChanged = after.filter((t) => {
+      const b = before.find((x) => x.key === t.key);
+      return b && b.label !== t.label;
+    }).length;
+    if (lostT > 0) fail('主题线稳定性', `追加无关消息后断掉 ${lostT} 条线`);
+    else if (labelChanged > 0) fail('主题线稳定性', `追加无关消息后 ${labelChanged} 条线改了标签`);
+    else ok('主题线稳定性', `追加无关消息后 ${before.length} 条线成员与标签均不变`);
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));
   }

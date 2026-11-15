@@ -482,7 +482,15 @@ export function clearClusterCache() {
  * 真相关（发布链路、面板调试、purge 移植）；跨天重合 >= 4 只有 3 对，也全对。
  */
 export const ENT_MIN_LEN = 7;
-export const ENT_KEEP = 24;
+/**
+ * 每个事件保留多少个实体（0.5.3 从 24 提到 40）
+ *
+ * 为什么要扩大：实体是按「df 小的优先」挑的，而 df 随每次新增消息变化。池子只有 24
+ * 个时，新消息挤进几个常见词就会把原来选中的挤出去，两条事件的交集随之跌破阈值、
+ * 线断掉 —— 实测同一段历史在两条消息之间就从「3 件 63 条」变成「2 件 35 条」。
+ * 池子放大后，边缘位置的名次波动不再影响交集。
+ */
+export const ENT_KEEP = 40;
 
 export function entitiesOf(ev, df, N = 1) {
   const maxDf = Math.max(3, Math.round(N / 50));
@@ -493,14 +501,21 @@ export function entitiesOf(ev, df, N = 1) {
     if ((df.get(t) || 0) > maxDf) continue;
     out.push(t);
   }
-  // df 小的优先，同样稀有取更长的（更可能是指标符而非普通长词）
-  out.sort((a, b) => ((df.get(a) || 0) - (df.get(b) || 0)) || (b.length - a.length));
+  // df 小的优先，同样稀有取更长的（更可能是指标符而非普通长词）。
+  // 最后用字典序兜底：不写这一层的话，df 与长度都相同的词会按 Set 的遍历顺序排，
+  // 而那取决于插入顺序 —— 同一份数据两次运行可能得到不同的实体集，主题线跟着抖。
+  out.sort((a, b) => ((df.get(a) || 0) - (df.get(b) || 0)) || (b.length - a.length) || (a < b ? -1 : a > b ? 1 : 0));
   return new Set(out.slice(0, ENT_KEEP));
 }
 
-/** 两条线的实体重合判定：同天 3 个，跨天 4 个 */
+/** 两条线的实体重合判定：同天 3 个，跨天 3 个
+ *
+ * 跨天从 4 降到 3（0.5.3）：实体池随 df 波动，边缘名次会被新消息挤动，卡在 4 上的
+ * 线一有风吹草动就断。阈值降到 3 之后同样的历史能稳住，误连风险由「实体必须是标识符」
+ * 这条前置条件兜着（`begin`/`notes` 那种通用词根本进不了池子）。
+ */
 export const THREAD_SAME_DAY = 3;
-export const THREAD_CROSS_DAY = 4;
+export const THREAD_CROSS_DAY = 3;
 
 /**
  * 把事件串成「主题线」。
@@ -579,7 +594,11 @@ export function linkThreads(events) {
     let common = null;
     for (const t of members[0].entities) {
       if (![...members].every((m) => m.entities.has(t))) continue;
-      if (!common || t.length > common.length) common = t;
+      // 全体共享的实体里取**最短**的，不是最长的。
+      // 取最长会系统性偏向底层实现名（makematcher / getboundingclientrect / toisostring），
+      // 那对「这条线在做什么」毫无说明力；短的那个通常才是主题词（publish / config）。
+      // 反正都过了「长度 >= 7 且是标识符」这道关，不会有 json/error 这种进来。
+      if (!common || t.length < common.length) common = t;
     }
     if (common) {
       label = common;
