@@ -73,6 +73,30 @@ if (a || b) console.log(`已写入 schemastery stub：${DIR}`);
 else console.log(`schemastery stub 已是最新：${DIR}`);
 
 // 顺手确认关键依赖都在，缺了就说清楚缺什么，而不是等到 selftest 抛一句报错
+// ── sharp stub（0.12.0）──────────────────────────────────────────────
+// `@xenova/transformers` 的 `src/utils/image.js` 在**模块顶层** import sharp，
+// 少了这个包连 `import { pipeline }` 都过不去（ERR_MODULE_NOT_FOUND）。
+//
+// 但真 sharp 要下 libvips 二进制（GitHub releases，国内基本连不上 —— 实测装到
+// `npm error path .../node_modules/sharp` 就断，白等 90 秒）。我们只做**文本**
+// embedding，图像路径永远走不到，放个空壳顶住即可。
+const SHARP_DIR = join(ROOT, 'node_modules', 'sharp');
+mkdirSync(SHARP_DIR, { recursive: true });
+const sharpPkg = JSON.stringify({
+  name: 'sharp', version: '0.0.0', type: 'commonjs', main: 'index.js',
+}, null, 2) + '\n';
+const sharpIdx = [
+  '// 空壳。文本 embedding 不会走到图像路径，这里只负责让 import 解析成功。',
+  'module.exports = function sharp() {',
+  '  throw new Error("sharp stub: image support not installed (text embedding does not need it)");',
+  '};',
+  '',
+].join('\n');
+const sa = put(join(SHARP_DIR, 'package.json'), sharpPkg);
+const sb = put(join(SHARP_DIR, 'index.js'), sharpIdx);
+if (sa || sb) console.log(`已写入 sharp stub：${SHARP_DIR}`);
+else console.log(`sharp stub 已是最新：${SHARP_DIR}`);
+
 const need = ['@deepseek-ai/schemastery'];
 const miss = need.filter((n) => !existsSync(join(ROOT, 'node_modules', ...n.split('/'))));
 if (miss.length) {

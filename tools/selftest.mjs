@@ -969,6 +969,58 @@ try {
           ok('图式强度', `2 件 56 条 → S_line=${sLine.toFixed(2)}（≥4 让位），threadS 已回传`);
         }
       }
+
+      // 语义向量：**故意不加载模型**（CI 上没装 transformers，本地也不该为跑测试下 100 MB）。
+      // 只验三件不依赖模型的事：缓存往返、余弦数学、加载失败时的降级。
+      const embMod = await import('../src/embed.js');
+      const vecFile = join(root, 'vec-roundtrip.json');
+      const dim = embMod.EMBED_DIM;
+      const mkVecB64 = (axis) => {
+        const a = new Float32Array(dim);
+        a[axis] = 1;
+        return Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
+      };
+      writeFileSync(vecFile, JSON.stringify({
+        _v: 1, model: embMod.EMBED_MODEL,
+        vec: { A: mkVecB64(0), B: mkVecB64(0), C: mkVecB64(1) },
+      }), 'utf8');
+      const embRt = embMod.createEmbedder({ cacheFile: vecFile, modelDir: join(root, 'no-model') });
+      embRt.load();
+      const sAB = embRt.sim('A', 'B');
+      const sAC = embRt.sim('A', 'C');
+      const sAX = embRt.sim('A', 'NOT_THERE');
+      if (embRt.size !== 3) {
+        fail('语义向量往返', `缓存里 3 条，读出来 ${embRt.size} 条`);
+      } else if (Math.abs(sAB - 1) > 1e-6 || Math.abs(sAC) > 1e-6) {
+        fail('语义向量往返', `同向应 1.0、正交应 0.0，实得 ${sAB} / ${sAC}`);
+      } else if (sAX !== null) {
+        fail('语义向量往返', `缺向量应返回 null（调用方据此回退），实得 ${sAX}`);
+      } else {
+        ok('语义向量往返', 'base64 往返 3 条成功；同向 1.0、正交 0.0、缺项 null');
+      }
+
+      // 降级：模型拿不到时必须返回 failed 而不是抛 —— 插件不能因为没模型就崩
+      const embFail = embMod.createEmbedder({
+        cacheFile: join(root, 'vec-none.json'),
+        modelDir: join(root, 'no-model-2'),
+        mirror: 'http://127.0.0.1:1',        // 必然连不上，快速失败
+      });
+      let failStatus = null;
+      let threw = null;
+      try {
+        failStatus = await embFail.init();
+      } catch (e) {
+        threw = String(e && e.message);
+      }
+      if (threw) {
+        fail('语义降级', `init() 抛了异常（应该只记状态）：${threw}`);
+      } else if (failStatus === 'ready') {
+        fail('语义降级', '不可达的镜像居然 ready 了，测试环境有问题');
+      } else if (!(failStatus === 'failed' && embFail.error)) {
+        fail('语义降级', `应返回 failed 且带 error，实得 ${failStatus} / ${embFail.error}`);
+      } else {
+        ok('语义降级', '模型不可达 → failed（不抛），调用方自动退回字符匹配');
+      }
     }
   } catch (e) {
     fail('主题线', e.message.slice(0, 90));

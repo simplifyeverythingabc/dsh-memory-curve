@@ -37,6 +37,7 @@ import { readEntries, clusterEvents, gradeEvents, renderForPrompt, currentThread
 import { resolveMemDir, dshHome, normalizeDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
 import { touch, sumAccess, stateOf, STATE_LABEL, suppress, SUPPRESS_DEFAULT } from './access.js';
+import { createEmbedder, EMBED_MIRROR } from './embed.js';
 import { mountAutoCollector, writeAtomic } from './collector.js';
 
 export const name = 'memory-curve';
@@ -303,6 +304,8 @@ function memFingerprint(dir) {
 
 /** 上一次聚类的中间结果。聚类只依赖文件内容，不依赖 now。 */
 let cachedCluster = null;
+/** 语义向量器。null = 未启用；status 非 ready 时所有调用点自动退回字符匹配。 */
+let embedder = null;
 
 function build(now = Date.now()) {
   // 路径可能因为 Loader 的 live 引用而在运行时变化，目录得有人建。
@@ -339,6 +342,21 @@ function build(now = Date.now()) {
 }
 
 /**
+ * 语义关联的两个闸门，都是**量出来的**，不是拍的。
+ *
+ * SEM_THRESHOLD = 0.85 —— bge 族模型的余弦基线极高，真实数据 13203 对里
+ *   min 0.377 / p50 0.700 / p90 0.787 / p99 0.837 / max 1.000。
+ *   我第一版照常识拍了 0.55，结果 94.7% 的事件对都判成「相似」—— 等于没筛。
+ *   0.85 落在 p99.5，命中 0.49%（65/13203），每个事件平均不到 1 个邻居，正好。
+ *
+ * SEM_MIN_CHARS = 12 —— 短文本在 bge 上会出荒谬的高分：
+ *   实测「原版重签名跑满 60 秒：pid 5388 稳定」↔「好了没」余弦 0.919。
+ *   剔除太短的文本比调阈值有效。
+ */
+const SEM_THRESHOLD = 0.85;
+const SEM_MIN_CHARS = 12;
+
+/**
  * 提取的两个副作用：抑制竞争者（RIF）+ 扩散激活的关联。
  *
  * 放一起算是因为它们都需要「这次查了谁」和「谁跟它像」，分两遍扫等于白扫。
@@ -361,20 +379,44 @@ export function afterRetrieval(touchedIds, limit = 3, evsIn = null) {
   const hit = evs.filter((e) => (e.ids || []).some((id) => touched.has(id)));
   if (!hit.length) return empty;
 
-  // 候选：与任一命中事件共享 >=2 个实体。阈值 2 是因为主题线用 3，这里要更宽一点 ——
-  // 检索时的「顺带想起」本来就该比「同一个主题」更松。
+  // 候选：语义优先，字符兜底。
+  //
+  // 语义可用时用余弦 ≥0.55（实测：近义「排查连接池超时」vs「maxWait 超时了」0.84，
+  // 无关 0.29，0.55 落在干净的空当里）。它能把「同一个意思、不同用词」认出来——
+  // 这是字符匹配永远做不到的。
+  //
+  // 语义不可用（模型没加载完 / 没装 / 没网）时**原样退回实体指纹**：共享 ≥2 个标识符。
+  // 两套的判据完全不同，所以下面把「为什么算相关」一起带出去（sem 标记），
+  // 渲染时一个说「共享 N 个线索」、一个说「语义相近 N%」，不混着讲。
   const scored = [];
-  for (const e of evs) {
-    if (hit.includes(e) || !e.entities || !e.entities.size) continue;
-    let shared = 0;
-    for (const t of hit) {
-      if (!t.entities) continue;
-      for (const x of t.entities) if (e.entities.has(x)) shared++;
+  const semantic = !!(embedder && embedder.status === 'ready' && embedder.size > 0);
+  if (semantic) {
+    const hitKeys = hit.map((t) => (t.ids && t.ids[0]) || '').filter(Boolean);
+    for (const e of evs) {
+      const ek = (e.ids && e.ids[0]) || '';
+      if (hit.includes(e) || !ek) continue;
+      let best = null;
+      for (const hk of hitKeys) {
+        const s = embedder.sim(hk, ek);
+        if (s !== null && (best === null || s > best)) best = s;
+      }
+      if (best !== null && best >= SEM_THRESHOLD && (e.texts || []).join('').length >= SEM_MIN_CHARS) {
+          scored.push({ ev: e, score: best, sem: true });
+        }
     }
-    if (shared >= 2) scored.push({ ev: e, shared });
+  } else {
+    for (const e of evs) {
+      if (hit.includes(e) || !e.entities || !e.entities.size) continue;
+      let shared = 0;
+      for (const t of hit) {
+        if (!t.entities) continue;
+        for (const x of t.entities) if (e.entities.has(x)) shared++;
+      }
+      if (shared >= 2) scored.push({ ev: e, score: shared, sem: false });
+    }
   }
   if (!scored.length) return empty;
-  scored.sort((a, b) => b.shared - a.shared);
+  scored.sort((a, b) => b.score - a.score);
   const top = scored.slice(0, limit);
 
   const sup = suppress(accessFile(), top.flatMap((x) => x.ev.ids || []), SUPPRESS_DEFAULT);
@@ -384,13 +426,18 @@ export function afterRetrieval(touchedIds, limit = 3, evsIn = null) {
 /** 把关联渲染成给人看的几行；没有关联返回空串 */
 export function renderRelated(related) {
   if (!related || !related.length) return '';
-  const lines = related.map(({ ev, shared }) => {
+  // 两套判据分开说：语义讲「相近多少」，实体讲「共享几个线索」。
+  // 混着讲会让读者以为这两个数是同一回事，其实尺度完全不同。
+  const anySem = related.some((r) => r.sem);
+  const lines = related.map(({ ev, score, sem }) => {
     const id = (ev.ids && ev.ids[0]) || '';
     const head = String((ev.texts && ev.texts[0]) || '')
       .replace(/[`*#|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
-    return `- [${id}] 共享${shared}个线索　${head}`;
+    const why = sem ? `语义相近 ${Math.round(score * 100)}%` : `共享${score}个线索`;
+    return `- [${id}] ${why}　${head}`;
   });
-  return `\n\n【顺手想起 · 共享线索】\n${lines.join('\n')}`;
+  const title = anySem ? '顺手想起 · 语义邻近' : '顺手想起 · 共享线索';
+  return `\n\n【${title}】\n${lines.join('\n')}`;
 }
 
 export function report(graded) {
@@ -465,6 +512,42 @@ export function apply(ctx, config = {}) {
   // readField() 会两种形态都吃 —— 所以这里存下 config，别缓存成字符串。
   liveConfig = config;
   ensureConfiguredDir();
+
+  // ── 语义向量（0.12.0）──────────────────────────────────────────────
+  // **后台加载，失败静默降级**。没装 @xenova/transformers、没网、镜像也挂 —— 都只是
+  // 退回字符匹配，绝不抛。首次要下 ~100 MB（实测 33.8 秒），之后本地加载几秒；
+  // 加载期间 status !== 'ready'，所有调用点自动走老路，行为与 0.11.0 完全一致。
+  //
+  // 关掉：config.semanticRecall = false。
+  if (config.semanticRecall !== false) {
+    const noteDir = join(dshHome(), 'memory-notes');
+    embedder = createEmbedder({
+      cacheFile: join(noteDir, '_vectors.json'),
+      modelDir: join(noteDir, '_models'),
+      mirror: typeof config.embedMirror === 'string' && config.embedMirror.trim()
+        ? config.embedMirror.trim()
+        : EMBED_MIRROR,
+    });
+    embedder.load();                       // 先把已缓存的向量读进来，能立刻用
+    embedder.init()
+      .then((st) => {
+        if (st !== 'ready') {
+          console.log(`[memory-curve] 语义向量不可用（${embedder.error}），退回字符匹配`);
+          return 0;
+        }
+        const evs = (cachedCluster && cachedCluster.events) || [];
+        return embedder.encode(
+          evs.map((e) => ({ key: (e.ids && e.ids[0]) || '', text: (e.texts || []).join('\n') })),
+        );
+      })
+      .then((n) => {
+        if (n) {
+          embedder.save();
+          console.log(`[memory-curve] 语义向量就绪：新编码 ${n} 条，缓存共 ${embedder.size} 条`);
+        }
+      })
+      .catch(() => { /* 任何失败都不影响主链路 */ });
+  }
 
   // schema 是第一道闸，这里是第二道 —— NaN / Infinity 都能穿过 typeof 检查
   // （typeof NaN === 'number'），得用 Number.isFinite 才算数。

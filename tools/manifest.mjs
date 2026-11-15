@@ -32,6 +32,7 @@ export const CODE_FILES = [
   'src/collector.js',
   'src/access.js',
   'src/paths.js',
+  'src/embed.js',
   'tools/memory-notes.mjs',
   'tools/build-dailies.mjs',
   'tools/manifest.mjs',
