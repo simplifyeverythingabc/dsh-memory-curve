@@ -43,7 +43,7 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync, statSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
-export const INDEX_VERSION = 1;
+export const INDEX_VERSION = 2;
 
 /**
  * 只存「从条目推出的、不随时间和访问变化」的字段。
@@ -121,6 +121,14 @@ export function loadIndex(file) {
     if (!o || o._v !== INDEX_VERSION) return null;
     if (!Array.isArray(o.events) || !Number.isSafeInteger(o.entryCount)) return null;
     if (!o.files || typeof o.files !== 'object') return null;
+    // 内容校验：每个事件都必须带 toks 数组。
+    // 0.14.0/0.14.1 写出的索引没有它，读回来会让分级全塌 L5，
+    // 而且**不会报错**。宁可全量重建一次，也不要拿一份算不对的索引。
+    // （版本号已升到 2 把它们挡在门外，这里再兜一层，防止将来又漏字段。）
+    if (!o.events.length) return null;
+    for (const e of o.events) {
+      if (!Array.isArray(e.toks)) return null;
+    }
 
     const events = o.events.map((e) => {
       const ev = {};
