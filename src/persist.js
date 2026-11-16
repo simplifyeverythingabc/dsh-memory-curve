@@ -53,10 +53,19 @@ export const INDEX_VERSION = 1;
  * 那比慢更糟。
  */
 const KEEP_FIELDS = [
-  'day', 'startAt', 'lastAt', 'ids', 'count', 'span', 'endIdx',
-  'sigDensity', 'salience', 'openness', 'title', 'head', 'texts',
+  'day', 'startAt', 'lastAt', 'ids', 'count', 'span', 'startIdx', 'endIdx',
+  'sigDensity', 'salience', 'openness', 'title', 'head',
   'serial', 'threadS',
 ];
+
+// `toks` / `entities` 不在 KEEP_FIELDS 里，但**必须存** —— 它们是 Set，
+// 上面的通用拷贝循环会原样带走一个 Set 引用，JSON 序列化后变成 `{}`。
+// 0.14.0 的教训：漏了它们导致 seed 之后旧事件 token 集为空，
+// `memory_search` 匹配不到旧事件（分级不受影响，所以不会显形）。
+//
+// `items` / `texts` 则**刻意不存**：它们可以从 `startIdx..endIdx` 精确重建，
+// 而 texts 占索引 94% 的体积。存它等于把 md 内容复制一份，
+// 再花 30 ms 解析；不存改读 md 只要 22 ms。
 
 /** 逐文件 stat（不读内容），返回 `{ [文件名]: {size, mtimeMs} }` */
 export function scanFiles(memDir) {
@@ -118,8 +127,10 @@ export function loadIndex(file) {
       for (const k of KEEP_FIELDS) if (k in e) ev[k] = e[k];
       ev.toks = new Set(e.toks || []);
       ev.entities = new Set(e.entities || []);
-      // items 只用于取 .length；存真实对象会白白膨胀几十倍
-      ev.items = new Array(e.itemCount || 0).fill({});
+      // items / texts **不存**，由调用方用 startIdx..endIdx 从 entries 重建。
+      // 先给空数组占位，让依赖 `.length` 的代码不至于炸。
+      ev.items = [];
+      ev.texts = [];
       return ev;
     });
     return { files: o.files, events, entryCount: o.entryCount, built: o.built || 0 };
@@ -132,15 +143,14 @@ export function loadIndex(file) {
 export function saveIndex(file, files, events, entryCount) {
   try {
     const slim = events.map((e) => {
-      const o = { itemCount: (e.items && e.items.length) || 0 };
+      const o = {};
       for (const k of KEEP_FIELDS) {
-        if (k === 'items') continue;
-        if (k === 'toks' || k === 'entities') {
-          o[k] = e[k] instanceof Set ? [...e[k]] : (e[k] || []);
-        } else if (k in e) {
-          o[k] = e[k];
-        }
+        if (k in e) o[k] = e[k];
       }
+      // Set 必须显式展开成数组 —— 通用拷贝会把 Set 引用原样带走，
+      // JSON.stringify(Set) 是 `{}`，读回来就成了空集。
+      o.toks = e.toks instanceof Set ? [...e.toks] : (e.toks || []);
+      o.entities = e.entities instanceof Set ? [...e.entities] : (e.entities || []);
       return o;
     });
     mkdirSync(dirname(file), { recursive: true });

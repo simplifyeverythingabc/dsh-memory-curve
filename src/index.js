@@ -356,6 +356,21 @@ export function build(now = Date.now()) {
     }
 
     const entries = readEntries(dir);
+
+    // 索引里**不存** items/texts（它们占索引 94%，且能从 startIdx..endIdx 精确重建）。
+    // 必须在 clusterEvents **之前**补回去：它内部的 signalDensity 要读 texts，
+    // 空 texts 会让显著性算错 —— 而且不会报错，只会让分级悄悄全变 L5。
+    if (seed && Array.isArray(seed.events)) {
+      for (const e of seed.events) {
+        if (Array.isArray(e.texts) && e.texts.length) continue;
+        const s = Number.isSafeInteger(e.startIdx) ? e.startIdx : 0;
+        const t = Number.isSafeInteger(e.endIdx) ? e.endIdx : s;
+        const slice = entries.slice(s, t + 1);
+        e.items = slice;
+        e.texts = slice.map((x) => x.text);
+      }
+    }
+
     // 标签仓库：读一次 → 交给 cluster → 有新线就写回（并清掉已消失的线）
     const store = loadThreadLabels();
     const events = clusterEvents(entries, { labelStore: store, seed });
