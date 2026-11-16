@@ -337,6 +337,7 @@ export function build(now = Date.now()) {
     // 判据必须是**逐文件**的（persist.planReuse）—— 用整体指纹的话，对话里每加
     // 一条消息指纹就变，等于每次都全量重建，而「加一条消息」正是最常见的操作。
     let seed = null;
+    let seedFiles = null;
     let files = null;
     if (cachedCluster === null) {
       try {
@@ -346,7 +347,10 @@ export function build(now = Date.now()) {
           const plan = planReuse(idx.files, files);
           // 'none' 一个文件都没变 → 事件全可直接用
           // 'tail' 只有末尾几天变了 → 前缀复用，只重算尾部
-          if (plan.mode !== 'full') seed = { entryCount: idx.entryCount, events: idx.events };
+          if (plan.mode !== 'full') {
+            seed = { entryCount: idx.entryCount, events: idx.events };
+            seedFiles = idx.files;
+          }
         }
       } catch { /* 索引不可用就走全量，不影响正确性 */ }
     }
@@ -359,9 +363,19 @@ export function build(now = Date.now()) {
     saveThreadLabels(store, clusterThreads().map((t) => String(t.startAt)));
     cachedCluster = { fp, entries, events };
 
-    // 落盘。只有内容真的变了才写（事件数变了，或根本没复用上）。
-    if (!seed || events.length !== (seed.events || []).length) {
-      saveIndex(eventsFile(), files || scanFiles(dir), events, entries.length);
+    // 落盘条件：**文件快照变了就写**，不是「事件数变了才写」。
+    //
+    // 0.14.0 第一版写成「事件数变了才写」，结果 11-16 那天持续追加消息但事件数没变，
+    // 索引里的 files 快照永远停在旧值 → planReuse 每次都判 'tail'，每次都重算那一天。
+    // 一天很便宜，但快照滞后于语料是错的：它该跟着源文件走。
+    //
+    // 只有「快照一致且事件数一致」才跳过写盘 —— 那才是真的一字节未变。
+    const snapshot = files || scanFiles(dir);
+    const changed = !seedFiles
+      || events.length !== (seed.events || []).length
+      || JSON.stringify(snapshot) !== JSON.stringify(seedFiles);
+    if (changed) {
+      saveIndex(eventsFile(), snapshot, events, entries.length);
     }
   }
   const { entries, events } = cachedCluster;

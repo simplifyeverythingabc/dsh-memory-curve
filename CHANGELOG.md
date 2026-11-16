@@ -35,7 +35,62 @@
 
 ---
 
-## [0.14.0] - 2026-11-16
+## [0.14.1] - 2026-11-16
+
+**修一个会让索引永远滞后的写盘条件。**
+
+### 现象
+
+重启后 `_events.json` 里的文件快照停在旧时间，`planReuse` 每次都判 `'tail'`，**每次都重算最后那一天**。
+
+### 根因
+
+0.14.0 的写盘条件写成了「事件数变了才写」：
+
+```js
+if (!seed || events.length !== (seed.events || []).length) { saveIndex(...) }
+```
+
+但「今天」这一天是**持续追加消息**的：一天里加 20 条消息，事件数可能一直是 1（都并进同一个事件）。于是：
+
+- 文件指纹变了（该重算），`planReuse` 判 `tail`
+- 重算完检查写盘条件 → 事件数没变 → **跳过写盘**
+- 快照还是旧的 → 下次又判 `tail`
+
+**一天很便宜，但快照滞后于语料是错的**：它该跟着源文件走，不是跟着事件数走。
+
+### 修复
+
+```js
+const snapshot = files || scanFiles(dir);
+const changed = !seedFiles
+  || events.length !== (seed.events || []).length
+  || JSON.stringify(snapshot) !== JSON.stringify(seedFiles);
+if (changed) saveIndex(eventsFile(), snapshot, events, entries.length);
+```
+
+只有「快照一致 **且** 事件数一致」才跳过写盘 —— 那才是真的一字节未变。
+
+`seed` 里也带上 `files` 快照（`seedFiles`），否则没有比较基准。
+
+### 实测
+
+```
+第 1 次 build:  67.5 ms，索引 entryCount 更新到 3336
+新进程第 2 次:  planReuse = none（完整命中），build 55.0 ms
+```
+
+### 剩下的 55 ms 是什么
+
+`readEntries`（22 ms）+ 2.3 MB 索引 JSON 解析（约 30 ms）。
+
+**在 `mode === 'none'`（一个文件都没变）时，`readEntries` 其实可以完全跳过** —— 事件全从索引来了。这一步没做，因为它会改变 `build()` 返回值里 `entries` 的语义（目前总是真数组），改动面比收益大，留到下一版。
+
+### 验证
+
+`check` 20/0、`selftest` 67/67、`bench` 33/33、`verify` 0 悬空。
+
+---## [0.14.0] - 2026-11-16
 
 **事件索引持久化：把「记忆算法」和「数据加载」分开。**
 
