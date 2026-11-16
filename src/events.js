@@ -401,7 +401,32 @@ export function clusterEvents(entries, opts = {}) {
   let reuse = 0;
   let prevEvents = null;
 
-  if (clusterState && clusterState.entries) {
+  // ── 前缀复用 ──────────────────────────────────────────────────────
+  //
+  // 两条路：
+  //   ① **进程内**（clusterState）：逐条比对象身份 `prev[p] === entries[p]`。
+  //      readEntries 的文件缓存会返回同一批对象，所以这条通常成立。
+  //   ② **跨进程**（opts.seed）：调用方已经用**文件指纹**（size+mtimeMs）证明
+  //      「前 seed.entryCount 条内容没变」，直接信任，跳过 O(n) 的身份比对。
+  //
+  // 第 ② 条是 0.14.0 加的，为了「无限对话」：语料长到 10 万条时，
+  // 每次启动重算要 438 ms，而文件指纹只要几十微秒。
+  //
+  // **安全性来源**：调用方必须用 persist.js 的 diffIndex 验过指纹。
+  // 指纹只含 size+mtimeMs —— 内容变了但大小和时间都没变的情况理论上存在
+  // （原地改一个字节且 mtime 被伪造），那种情况会读到旧事件。这是刻意的权衡：
+  // 手工伪造 mtime 不是正常使用方式，为它每次跑全量不值得。
+  if (opts.seed && Number.isSafeInteger(opts.seed.entryCount)
+      && opts.seed.entryCount <= entries.length
+      && Array.isArray(opts.seed.events)) {
+    p = opts.seed.entryCount;
+    prevEvents = opts.seed.events;
+    // 只有完全落在种子前缀内、且已封口的事件能复用
+    for (let i = 0; i < prevEvents.length; i++) {
+      if (prevEvents[i].endIdx < p) reuse = i + 1;
+      else break;
+    }
+  } else if (clusterState && clusterState.entries) {
     const prev = clusterState.entries;
     const n = Math.min(prev.length, entries.length);
     while (p < n && prev[p] === entries[p]) p++;

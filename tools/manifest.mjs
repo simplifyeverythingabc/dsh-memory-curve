@@ -34,6 +34,7 @@ export const CODE_FILES = [
   'src/paths.js',
   'src/embed.js',
   'src/narrate.js',
+  'src/persist.js',
   'tools/memory-notes.mjs',
   'tools/build-dailies.mjs',
   'tools/manifest.mjs',

@@ -39,6 +39,7 @@ import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searc
 import { touch, sumAccess, stateOf, STATE_LABEL, suppress, SUPPRESS_DEFAULT } from './access.js';
 import { createEmbedder, EMBED_MIRROR } from './embed.js';
 import { narrateDay } from './narrate.js';
+import { scanFiles, planReuse, loadIndex, saveIndex } from './persist.js';
 import { mountAutoCollector, writeAtomic } from './collector.js';
 
 export const name = 'memory-curve';
@@ -215,6 +216,9 @@ const accessFile = () => join(dshHome(), 'memory-notes', '_access.json');
 // 主题线标签仓库。放 memory-notes 根而不是 _digest 里：_digest 是每日摘要，会被
 // 重算/清理；标签属于长期标识，不该跟着摘要一起没。
 const threadsFile = () => join(dshHome(), 'memory-notes', '_threads.json');
+// 事件索引缓存（0.14.0）。存的是「从条目推出、不随时间和访问变化」的事件骨架，
+// 让新进程能跳过全量解析与聚类。见 persist.js 顶部关于判据与边界的说明。
+const eventsFile = () => join(dshHome(), 'memory-notes', '_events.json');
 
 /**
  * 主题线标签仓库的读写。
@@ -315,7 +319,7 @@ let cachedCluster = null;
 /** 语义向量器。null = 未启用；status 非 ready 时所有调用点自动退回字符匹配。 */
 let embedder = null;
 
-function build(now = Date.now()) {
+export function build(now = Date.now()) {
   // 路径可能因为 Loader 的 live 引用而在运行时变化，目录得有人建。
   // apply 时建过一次，之后每次 build 再确认一下（目录已存在时只是一次 stat）。
   ensureConfiguredDir();
@@ -327,13 +331,38 @@ function build(now = Date.now()) {
   const fp = memFingerprint(dir);
 
   if (cachedCluster === null || cachedCluster.fp !== fp) {
+    // ── 持久化索引（0.14.0）：跨进程复用已整理好的事件 ──────────────
+    //
+    // 内存缓存 cachedCluster 在新进程里必然是 null，所以「跨进程」这条只能靠磁盘。
+    // 判据必须是**逐文件**的（persist.planReuse）—— 用整体指纹的话，对话里每加
+    // 一条消息指纹就变，等于每次都全量重建，而「加一条消息」正是最常见的操作。
+    let seed = null;
+    let files = null;
+    if (cachedCluster === null) {
+      try {
+        files = scanFiles(dir);
+        const idx = loadIndex(eventsFile());
+        if (idx) {
+          const plan = planReuse(idx.files, files);
+          // 'none' 一个文件都没变 → 事件全可直接用
+          // 'tail' 只有末尾几天变了 → 前缀复用，只重算尾部
+          if (plan.mode !== 'full') seed = { entryCount: idx.entryCount, events: idx.events };
+        }
+      } catch { /* 索引不可用就走全量，不影响正确性 */ }
+    }
+
     const entries = readEntries(dir);
     // 标签仓库：读一次 → 交给 cluster → 有新线就写回（并清掉已消失的线）
     const store = loadThreadLabels();
-    const events = clusterEvents(entries, { labelStore: store });
+    const events = clusterEvents(entries, { labelStore: store, seed });
     // 无条件调一次：新线要写入，陈旧记录要清掉，两件事都在 saveThreadLabels 里判
     saveThreadLabels(store, clusterThreads().map((t) => String(t.startAt)));
     cachedCluster = { fp, entries, events };
+
+    // 落盘。只有内容真的变了才写（事件数变了，或根本没复用上）。
+    if (!seed || events.length !== (seed.events || []).length) {
+      saveIndex(eventsFile(), files || scanFiles(dir), events, entries.length);
+    }
   }
   const { entries, events } = cachedCluster;
   // 访问证据：这个事件下所有 id 的累计被查次数、提取时间线、当前残余抑制
