@@ -46,6 +46,7 @@ export const CODE_FILES = [
   'tools/selftest.mjs',
   'tools/bench.mjs',
   'tools/check.mjs',
+  'tools/persist-test.mjs',
 ];
 
 /** 导出文档的尾部（CI 配置放最后） */
