@@ -108,13 +108,13 @@ export const Config = z.object({
       '完整记忆存放目录。填了就用它（不存在会自动创建），支持 %USERPROFILE%\\memory、~/memory、D:/memory 这几种写法；留空则回退到 DSH_MEMORY_DIR 环境变量，再不行用 <DSH_HOME>/memory。',
     )
     .volatile(),
-  maxL1: z.number().min(0).max(200).default(12).description('L1 事件最多列几条，控制注入体积。'),
+  maxL1: z.number().min(0).max(200).default(6).description('L1 事件最多列几条，控制注入体积。'),
   injectContext: z
     .boolean()
     .default(true)
     .description('是否把记忆索引注入系统提示。设 false 后索引不再占每步 token，六个 memory_curve_* 工具照常可用，按需现查。'),
-  maxL2: z.number().min(0).max(200).default(20).description('L2 事件最多列几条。'),
-  maxL3: z.number().min(0).max(200).default(8).description('L3 事件最多列几条。'),
+  maxL2: z.number().min(0).max(200).default(8).description('L2 事件最多列几条。'),
+  maxL3: z.number().min(0).max(200).default(3).description('L3 事件最多列几条。'),
   maxThreads: z
     .number()
     .min(0)
@@ -272,7 +272,8 @@ function saveThreadLabels(store, liveKeys) {
   }
 }
 
-const MAX_L1 = 12, MAX_L2 = 20, MAX_L3 = 8, MAX_THREADS = 3, INDEX_DAYS = 10;
+/** 注入配额（0.15.0 收紧）。实测每 step 都要付这份 token，见 README「成本」一节。 */
+const MAX_L1 = 6, MAX_L2 = 8, MAX_L3 = 3, MAX_THREADS = 2, INDEX_DAYS = 5;
 
 const PAD = (n) => String(n).padStart(2, '0');
 const dayOf = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${PAD(d.getMonth() + 1)}-${PAD(d.getDate())}`; };
@@ -730,25 +731,32 @@ export function apply(ctx, config = {}) {
       const c = {};
       for (const g of graded) c[g.level] = (c[g.level] || 0) + 1;
       const idx = dayIndex(graded);
+      // ── 注入体积（0.15.0 收紧）──────────────────────────────────────
+      //
+      // 这份文本**每 step 都要付一次 token**（DSH 每步重新组装系统提示，
+      // 而 context.text 是函数 —— 这不是 bug，是它必须每次给出最新内容）。
+      //
+      // 0.14.4 实测 2694 字符 ≈ 1684 token。有人指出这个成本太高，是对的：
+      // 注入越多 → 上下文越快撑满 → 压缩越勤 → 旧内容越早被压掉，
+      // **一个号称解决记忆的工具反而加速了记忆被压掉**。
+      //
+      // 所以这里只留「路标」，不留内容：
+      //   · 路径全去掉（模型不需要知道文件在哪，它只需知道调哪个工具）
+      //   · 查法压成两行（原来七行，其中五行是解释，模型读一次就懂）
+      //   · 天数 10 → 5，L2 20 → 8，L3 8 → 3
+      //   · 标题截断 42 → 32 字符
+      //
+      // 检索能力**一点没减**：memory_search 仍然扫全部 3400 条原文。
+      // 砍掉的只是"眼前摆多少条线索"，不是"能查到什么"。
       const text = [
-        '【记忆事件索引 · 按遗忘曲线】',
-        `完整流水 ${memDir()}（${entries.length} 条 / ${events.length} 事件）`,
-        `每日摘要 ${digestDir()}　总报告 ${gradeFile()}`,
-        ...(collectorStatus ? [collectorStatus.lastError
-          ? `自动采集：待重试 — ${collectorStatus.lastError.slice(0, 160)}`
-          : `自动采集：已启用；最近落盘 ${collectorStatus.lastSuccess ? fmtYMD(Date.parse(collectorStatus.lastSuccess)) : '等待首次完成'}；待摘要 ${collectorStatus.pendingDays} 天`] : []),
-        `分级：L1 ${c.L1 || 0}　L2 ${c.L2 || 0}　L3 ${c.L3 || 0}　L4 ${c.L4 || 0}　L5 ${c.L5 || 0}`,
+        `【记忆索引】${entries.length} 条 / ${events.length} 事件　L1 ${c.L1 || 0}·L2 ${c.L2 || 0}·L3 ${c.L3 || 0}·L4 ${c.L4 || 0}·L5 ${c.L5 || 0}`
+          + (collectorStatus?.lastError ? `　采集待重试：${String(collectorStatus.lastError).slice(0, 80)}` : ''),
         '',
-        '【最近几天 · 定位用】',
+        '【最近几天】',
         idx,
         '',
-        '查法：① 先看下面索引认出大致哪天 → memory_curve_day(日期) 读摘要；',
-        '　　　② 问具体术语/偏移/文件名时别指望摘要里一定有那个词，直接 memory_search(关键词) 全流水搜；',
-        '　　　③ 拿到 id 后 memory_curve_raw(id) 取全文；整个事件要一起看时用 memory_curve_raw(event:"e_日期_时分")，范围写法 m_a..m_b 只取首尾两条，别当「整段」用。',
-        '**回答涉及记忆时必须带 id 或日期**，没查到就说没查到，不许凭标题编。',
-        '状态：热=默认召回　冷=降权但可查　档=只留索引（原文仍在）。',
-        '用户问「之前/以前/记不记得/上次」这类遗忘型问题时，冷和档都要查，不要只看热的。',
-        '命令、偏移、字节、哈希一律以原文为准。',
+        '查法：摘要 memory_curve_day(日期)；查术语/偏移/文件名用 memory_search(词) 全流水搜；原文 memory_curve_raw(id) 或 memory_curve_raw(event:"e_日期_时分")。',
+        '回答涉及记忆必须带 id 或日期；没查到就说没查到，不许编；冷/档也要查，不只看热的。',
         '',
         body || '（暂无高留存事件）',
       ].join('\n');

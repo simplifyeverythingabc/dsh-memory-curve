@@ -328,7 +328,7 @@ try {
     } else {
       const out = String(ctxDef.text());
       ok('context 求值', `${out.length} 字符`);
-      if (!out.includes('记忆事件索引')) fail('context 内容', '缺少标题行');
+      if (!out.includes('【记忆索引】')) fail('context 内容', '缺少标题行');
     }
   }
 
@@ -934,8 +934,12 @@ try {
         fail('元认知置信度', `1 小时前查过 10 次的 confidence=${cClear}，应 >0.5`);
       } else {
         // 渲染层也要真的标出来
-        const fogTxt = evm.renderForPrompt(gFog, { maxL1: 5, maxL2: 0, maxL3: 0, maxThreads: 0, now: NOW });
-        const clearTxt = evm.renderForPrompt(gClear, { maxL1: 5, maxL2: 0, maxL3: 0, maxThreads: 0, now: NOW });
+        // maxOlder 必须显式给：30 天前的事件落在 older 桶，只有「更早」段会渲染它。
+        // 0.15.0 把该段默认关掉（省 token），不显式打开的话这条断言会因为
+        // 「什么都没渲染出来」而假失败 —— 那测的就不是置信度了。
+        const renderOpts = { maxL1: 5, maxL2: 0, maxL3: 0, maxThreads: 0, maxOlder: 5, now: NOW };
+        const fogTxt = evm.renderForPrompt(gFog, renderOpts);
+        const clearTxt = evm.renderForPrompt(gClear, renderOpts);
         if (!/- [▸~]*~/.test(fogTxt)) fail('元认知置信度', `模糊事件没标 ~：${fogTxt.split('\n').pop()}`);
         else if (/- [▸]*~/.test(clearTxt)) fail('元认知置信度', `清晰事件被误标 ~：${clearTxt.split('\n').pop()}`);
         else ok('元认知置信度', `模糊 ${cFog}（标 ~）/ 清晰 ${cClear}（不标）`);

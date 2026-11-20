@@ -56,7 +56,9 @@ test('插件真实 apply 接线：消息事件 -> 异步落盘 -> 摘要 -> 上�
     assert.ok(digest.includes('自动采集'));
     const prompt = contexts[0].text();
     assert.ok(prompt.includes('2 条'));
-    assert.ok(prompt.includes('自动采集：已启用'));
+    // 0.15.0 起采集状态只在**出错时**出现在注入里（正常时省 token）。
+    // 这里验的是「注入确实来自插件、且带了条数」，不再死盯某句状态文案。
+    assert.ok(prompt.includes('【记忆索引】'));
     assert.ok(!prompt.includes('等待首次完成'));
   } finally {
     for (const dispose of disposers.reverse()) dispose();

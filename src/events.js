@@ -1151,7 +1151,13 @@ export const LEVEL_NAME = {
 export const MAX_THREADS_CAP = 20;
 
 /** 生成注入用的精简文本：L1 给标题，L2/L3 各给一行 */
-export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, maxThreads = 3, threads = null, now = Date.now() } = {}) {
+/**
+ * 标题截断长度。0.15.0 从 42 收到 32 —— 每行省 10 字符，35 行就是 350 字符，
+ * 而 32 个汉字足够认出「那件事是什么」。真正的细节在摘要里，不在这里。
+ */
+const TITLE_CHARS = 32;
+
+export function renderForPrompt(graded, { maxL1 = 6, maxL2 = 8, maxL3 = 3, maxThreads = 2, maxOlder = 0, threads = null, now = Date.now() } = {}) {
   const by = (lv) => graded.filter((g) => g.level === lv);
 
   /**
@@ -1298,7 +1304,7 @@ export function renderForPrompt(graded, { maxL1 = 12, maxL2 = 20, maxL3 = 8, max
     .filter((g) => (now - g.startAt) / DAY2 >= 7 && !shown.has(g.idx))
     .map((g) => ({ g, w: g.S * (isChat(g) ? 0.25 : 1) * (1 + technicality(g)) }))
     .sort((a, b) => b.w - a.w)
-    .slice(0, 4)
+    .slice(0, Math.max(0, Math.floor(maxOlder)))
     .map((x) => x.g);
   if (olderPool.length) {
     out.push('', '【更早 · 按 S 补位（不限等级）】', ...olderPool.map(line));
