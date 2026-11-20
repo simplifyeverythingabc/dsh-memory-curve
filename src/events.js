@@ -18,6 +18,7 @@
  * 注入只给 L1+L2（+部分 L3）的梗概，完整内容永远留在记忆目录里。
  */
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 export const GAP_MIN = 18;        // 相邻条目间隔超过这么多分钟就断事件
@@ -234,8 +235,9 @@ export function cleanLine(line) {
   if (/^<\/?[a-z][a-z-]*$/i.test(s)) return '';
   if (/^(分析|思考|工具调用|收尾|开头)$/.test(s)) return '';
   if (/^<(tooltip|analysis|assistant|summary|thinking)\b/i.test(s)) return '';
-  // 纯英文长句基本是模型的过程叙述/元描述，不是内容
-  if (!/[\u4e00-\u9fa5]/.test(s) && s.length > 50 && /\s/.test(s)) return '';
+  // 以前这里会把「>50 字符且不含中文」的行整行丢掉，理由是「像过程叙述」。
+  // 代价是纯英文事件的头尾全空：摘要读不出那天在干什么，检索也扫不到线索。
+  // 噪声最多让首句难看一点，丢内容却会让摘要直接失去意义，所以改为一律保留。
   return s;
 }
 
@@ -263,6 +265,39 @@ function lastLine(texts) {
 
 // 行尾可带 <!-- m_YYYYMMDD_NNNNNN --> 锚点；旧文件没有锚点，用位置兜底编号
 const DAY_RE = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}):(\d{2})\s+［(.+?)］(?:\s*<!--\s*(m_[0-9]{8}_[0-9a-f]{6})\s*-->)?\s*$/;
+const LITERAL_HEAD = '<!-- dsh-note:literal-head:7f3a -->';
+
+/**
+ * Make legacy duplicate anchors unique without changing the first occurrence.
+ *
+ * Older imports used a content-only SHA-1 anchor, so repeated messages on one
+ * day share an id. That breaks raw lookup and makes the first id collide as a
+ * vector key. The first occurrence remains stable for old digest references;
+ * later occurrences get a deterministic id derived from the old id, position,
+ * role and text. A repair tool can persist these ids back to disk.
+ */
+export function normalizeEntryIds(entries) {
+  const counts = new Map();
+  const used = new Set();
+  for (const entry of entries || []) {
+    const original = entry.id;
+    const ordinal = (counts.get(original) || 0) + 1;
+    counts.set(original, ordinal);
+    if (!original || ordinal === 1) {
+      if (entry.id) used.add(entry.id);
+      continue;
+    }
+    let salt = 0;
+    let id;
+    do {
+      const key = `${original}\\0${entry.at}\\0${entry.who}\\0${entry.text}\\0${ordinal}\\0${salt++}`;
+      id = `m_${entry.day.replace(/-/g, '')}_${createHash('sha1').update(key).digest('hex').slice(0, 6)}`;
+    } while (used.has(id));
+    entry.id = id;
+    used.add(id);
+  }
+  return entries;
+}
 
 /**
  * 单日文件解析缓存（0.4.1）
@@ -290,7 +325,19 @@ function parseDayFile(raw, day) {
       if (cur) { entries.push(cur); cur = null; }
       continue;
     }
+    if (line.startsWith(LITERAL_HEAD)) {
+      if (cur) cur.buf.push(line.slice(LITERAL_HEAD.length));
+      continue;
+    }
     const mm = DAY_RE.exec(line);
+    // A body can quote an unanchored header from another date. Legacy imports
+    // keep anchored cross-file records, but an unanchored cross-file line is
+    // text, not a new entry. This prevents current chat explanations from
+    // becoming phantom historical events.
+    if (mm && !mm[5] && mm[1] !== day) {
+      if (cur) cur.buf.push(line);
+      continue;
+    }
     if (mm) {
       if (cur) entries.push(cur);
       const [, d, hh, mi, who, anchored] = mm;
@@ -318,6 +365,7 @@ function parseDayFile(raw, day) {
       e.id = `m_${e.day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`;
     }
   }
+  normalizeEntryIds(entries);
   return entries;
 }
 

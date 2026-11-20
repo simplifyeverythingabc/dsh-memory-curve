@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-curve",
-  "version": "0.15.0",
+  "version": "0.15.4",
   "description": "按艾宾浩斯遗忘曲线给记忆事件分级：高留存的进上下文，低留存的只留文件。上千条对话压成几百字索引，完整记忆仍在磁盘上按需反查。",
   "type": "module",
   "license": "MIT",
@@ -63,6 +63,9 @@
     "check": "node tools/check.mjs",
     "verify": "node tools/verify-ids.mjs",
     "verify:strict": "node tools/verify-ids.mjs --strict",
+    "repair:ids": "node tools/repair-ids.mjs --apply",
+    "test:ids": "node tools/id-repair-test.mjs",
+    "test:regression": "node tools/regression-test.mjs",
     "selftest": "node tools/selftest.mjs",
     "test:collector": "node --test tools/collector-test.mjs tools/collector-host-test.mjs",
     "test:persist": "node tools/persist-test.mjs",

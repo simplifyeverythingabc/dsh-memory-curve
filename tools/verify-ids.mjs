@@ -42,6 +42,8 @@ const HEAD = /^(?:\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}\s+［.+?］(?:\s*<!--\s*(m_[0
 
 // 1) 收集流水里真实存在的 ID
 const live = new Set();
+const duplicateIds = [];
+const liveOwner = new Map();
 for (const fn of readdirSync(MEM)) {
   const m = /^(\d{4}-\d{2}-\d{2})\.md$/.exec(fn);
   if (!m) continue;
@@ -54,7 +56,10 @@ for (const fn of readdirSync(MEM)) {
     // 与 events.js readEntries 一致：兜底编号只给缺锚点的条目递增
     const anchored = mm[1];
     if (!anchored) seq += 1;
-    live.add(anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`);
+    const id = anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`;
+    if (liveOwner.has(id)) duplicateIds.push({ id, first: liveOwner.get(id), again: `${fn}:${line}` });
+    else liveOwner.set(id, `${fn}:${line}`);
+    live.add(id);
   }
 }
 
@@ -127,6 +132,12 @@ for (const fn of readdirSync(DIG)) {
 
 // 3) 报告
 console.log(`流水 ID ${live.size} 个　摘要 ${digests} 份　被引用 ${used.size} 个`);
+if (duplicateIds.length) {
+  console.log(`重复 ID：${duplicateIds.length} 处 —— 先修复再做精确回查`);
+  for (const d of duplicateIds.slice(0, 12)) console.log(`  ${d.id}: ${d.first} / ${d.again}`);
+} else {
+  console.log('重复 ID：0 —— 每条流水可唯一回查');
+}
 if (!dangling.length) {
   console.log('悬空引用：0 —— 全部可回查');
 } else {
@@ -203,4 +214,4 @@ console.log(`流水未进摘要的条目：${uncovered} / ${live.size}`);
 // 疑似（膨胀倍数、锚点重复率）只告警 —— 它们是启发式，加进退出码会把误报变成
 // 「所以大家都加 || true」，校验就没意义了。需要严格时用 --strict。
 const STRICT = process.argv.includes('--strict');
-process.exitCode = (dangling.length || rangeBad.length || broken.length || (STRICT && integrity.length)) ? 1 : 0;
+process.exitCode = (dangling.length || duplicateIds.length || rangeBad.length || broken.length || (STRICT && integrity.length)) ? 1 : 0;

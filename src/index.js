@@ -835,7 +835,21 @@ export function apply(ctx, config = {}) {
       },
       async execute() {
         const days = listDays({ memDir: memDir(), digestDir: digestDir() });
-        return { text: `共 ${days.length} 天：\n` + days.join('\n') };
+        // 描述里写了「条数/事件数/分级/关键主题」，就真的给出来。
+        // 只列日期等于让调用方自己再读一遍摘要，白跑一次工具。
+        const lines = days.map((day) => {
+          const digest = readDigest({ digestDir: digestDir(), day }) || '';
+          const head = digest.match(/^# .*?·\s*(\d+) 条 \/ (\d+) 事件/m);
+          const grade = digest.match(/^分级：(.+)$/m)?.[1]?.trim() || '—';
+          // 主题词是二元切片的碎片（「题线、主题、公式」），对人不友好。
+          // 优先用当天第一个事件的首句，那才是「那天在干什么」。
+          const topic = (digest.match(/^- 开头：(.+?)　\[/m)?.[1]
+            || digest.match(/^主题：(.+)$/m)?.[1]
+            || '—').trim().slice(0, 40);
+          const count = head ? `${head[1]}条 ${head[2]}事件` : '摘要缺失';
+          return `- ${day}　${count}　${grade}　${topic}`;
+        });
+        return { text: `共 ${days.length} 天：\n` + lines.join('\n') };
       },
       presentCall: () => ({ card: 'generic', title: '记忆日期', kind: 'other', rawInput: '' }),
     }));

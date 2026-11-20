@@ -462,6 +462,24 @@ npm run verify:strict        # 等价于 node tools/verify-ids.mjs --strict
 
 此时上面那些疑似项也升级为失败。日常用默认，发布前跑一次 strict。
 
+### 历史重复 ID 修复
+
+早期导入的流水可能用“正文内容哈希”生成锚点，同一天重复说相同内容时会出现重复 `memory_id`。这会让原文按 ID 只取第一条，也会让语义向量缓存覆盖一个事件。先预览：
+
+```bash
+node tools/repair-ids.mjs
+```
+
+确认输出的重复位置后再写回。脚本只改重复条目的头部锚点，首条旧 ID 保留；每个改动文件旁边先生成 `.repair-backup-时间戳` 备份：
+
+```bash
+node tools/repair-ids.mjs --apply
+node tools/verify-ids.mjs --strict
+node tools/build-dailies.mjs
+```
+
+新采集器使用 session + sequence 作为来源去重键，不会按旧的内容哈希规则继续制造重复 ID。
+
 ## 验证它能不能跑
 
 这个自检不需要 DSH 在运行，也不碰你的真实数据；但**跑的位置不同，做法不同**。
@@ -651,7 +669,8 @@ dsh-memory-curve/
 ├── tools/
 │   ├── memory-notes.mjs        会话日志 → 流水
 │   ├── build-dailies.mjs       流水 → 每日摘要
-│   ├── verify-ids.mjs          完整性校验（悬空引用）
+│   ├── verify-ids.mjs          完整性校验（重复/悬空引用）
+│   ├── repair-ids.mjs          历史重复 ID 预览与修复
 │   ├── check.mjs               语法 + 清单 + CHANGELOG 结构
 │   ├── selftest.mjs            接口自检（项数以它实际输出为准）
 │   ├── bench.mjs               检索基准

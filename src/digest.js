@@ -10,7 +10,7 @@
  *
  * 检索路径：上下文索引 → 某日摘要 → 该日完整流水
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEntries, clusterEvents, gradeEvents, EN_STOP, cleanLine } from './events.js';
 
@@ -274,32 +274,16 @@ export function grepDay(arg) {
     throw new TypeError('grepDay 的参数改成了对象形式：grepDay({ memDir, day, pattern, maxChars })');
   }
   const { memDir, day, pattern, maxChars = 4000 } = arg || {};
+  const limit = Number.isFinite(maxChars) ? Math.max(200, Math.min(200000, Math.floor(maxChars))) : 4000;
   assertDay(day, 'grepDay');
   const p = join(memDir, `${day}.md`);
   if (!existsSync(p)) return null;
-  const raw = readFileSync(p, 'utf8');
-  const HEAD = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+［(.+?)］(?:\s*<!--\s*(m_[0-9]{8}_[0-9a-f]{6})\s*-->)?\s*$/;
-  const blocks = [];
-  let cur = null;
-  let seq = 0;
-  for (const line of raw.split(/\r?\n/)) {
-    const m = HEAD.exec(line);
-    if (m) {
-      if (cur) blocks.push(cur);
-      // 与 readById / events.js readEntries 一致：兜底编号只给缺锚点的递增
-      const anchored = m[4];
-      if (!anchored) seq += 1;
-      cur = {
-        head: line,
-        body: [],
-        id: anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`,
-      };
-    } else if (cur) {
-      cur.body.push(line);
-    }
-  }
-  if (cur) blocks.push(cur);
-
+  const parsed = readEntries(memDir).filter((entry) => entry.day === day);
+  const blocks = parsed.map((entry) => ({
+    head: `${entry.day} ${entry.hhmm} ［${entry.who}］ <!-- ${entry.id} -->`,
+    body: entry.text ? [entry.text] : [],
+    id: entry.id,
+  }));
   let hits = blocks;
   if (pattern) {
     const matcher = makeMatcher(pattern);
@@ -310,12 +294,12 @@ export function grepDay(arg) {
   for (let i = 0; i < hits.length; i++) {
     const b = hits[i];
     const txt = b.head + '\n' + b.body.join('\n').trim();
-    if (used + txt.length > maxChars) {
+    if (used + txt.length > limit) {
       // 单条就超预算时退化为截断输出：只报「还有 N 条」而不给正文，
       // 调用方看到「命中 1 条」却读不到任何内容，等于白查。
-      const room = maxChars - used;
+      const room = limit - used;
       if (room >= 160) out.push(txt.slice(0, room) + `\n…（此条 ${txt.length} 字符，已截断；加大 maxChars 取全文）`);
-      else out.push(`（命中 ${hits.length} 条，剩余 ${hits.length - i} 条超出 maxChars=${maxChars}；加大 maxChars 取值）`);
+      else out.push(`（命中 ${hits.length} 条，剩余 ${hits.length - i} 条超出 maxChars=${limit}；加大 maxChars 取值）`);
       break;
     }
     out.push(txt);
@@ -337,39 +321,12 @@ export function readById(arg) {
     throw new TypeError('readById 的参数改成了对象形式：readById({ memDir, id })');
   }
   const { memDir, id } = arg || {};
-  const m = /^m_(\d{4})(\d{2})(\d{2})_([0-9a-f]{6})$/.exec(String(id || ''));
-  if (!m) return null;
-  const day = `${m[1]}-${m[2]}-${m[3]}`;
-  const p = join(memDir, `${day}.md`);
-  if (!existsSync(p)) return null;
-  const raw = readFileSync(p, 'utf8');
-  const HEAD = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+［(.+?)］(?:\s*<!--\s*(m_[0-9]{8}_[0-9a-f]{6})\s*-->)?\s*$/;
-  const lines = raw.split(/\r?\n/);
-  let cur = null;
-  let seq = 0;
-  const out = [];
-  for (const line of lines) {
-    const mm = HEAD.exec(line);
-    if (mm) {
-      if (cur) out.push(cur);
-      // 兜底编号只给「缺锚点」的条目递增，与 events.js readEntries 保持一致。
-      // 以前这里每行都 seq++，混合文件里同一条旧条目会在两处算出不同 id，
-      // 表现为 readById 报「没有 id」。
-      const anchored = mm[4];
-      if (!anchored) seq += 1;
-      cur = {
-        head: line,
-        body: [],
-        id: anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`,
-      };
-    } else if (cur) {
-      cur.body.push(line);
-    }
-  }
-  if (cur) out.push(cur);
-  const hit = out.find((b) => b.id === String(id));
+  const wanted = String(id || '');
+  if (!/^m_[0-9]{8}_[0-9a-f]{6}$/.test(wanted)) return null;
+  const hit = readEntries(memDir).find((entry) => entry.id === wanted);
   if (!hit) return null;
-  return { id: hit.id, day, text: hit.head + '\n' + hit.body.join('\n').trim() };
+  const head = `${hit.day} ${hit.hhmm} ［${hit.who}］ <!-- ${hit.id} -->`;
+  return { id: hit.id, day: hit.day, text: head + (hit.text ? `\n${hit.text}` : '') };
 }
 
 /** 按 id 前缀或日期范围批量取（给「回查一段」用） */
@@ -378,6 +335,7 @@ export function readByIds(arg) {
     throw new TypeError('readByIds 的参数改成了对象形式：readByIds({ memDir, ids, maxChars })');
   }
   const { memDir, ids, maxChars = 4000 } = arg || {};
+  const limit = Number.isFinite(maxChars) ? Math.max(200, Math.min(200000, Math.floor(maxChars))) : 4000;
   const res = [];
   const picked = [];        // 真正塞进结果的 id —— 调用方用它记访问，别拿 pool 去切
   let used = 0;
@@ -385,16 +343,16 @@ export function readByIds(arg) {
   for (const id of ids) {
     const one = readById({ memDir, id });
     if (!one) continue;
-    if (used + one.text.length > maxChars) {
+    if (used + one.text.length > limit) {
       // 保底：一条都还没塞进去时，至少给第一条的截断版。
       // 以前这里是裸 break，单条超过 maxChars 就 found=0，
       // 工具返回「共 N 条 / 本次只取到 0 条」，看起来像坏了。
       if (res.length === 0) {
-        res.push(one.text.slice(0, Math.max(200, maxChars - 120))
-          + `\n…（本条 ${one.text.length} 字符，已截断到 ${maxChars} 上限；加大 maxChars 取全文）`);
+        res.push(one.text.slice(0, Math.max(200, limit - 120))
+          + `\n…（本条 ${one.text.length} 字符，已截断到 ${limit} 上限；加大 maxChars 取全文）`);
         picked.push(one.id ?? id);
         truncated = 1;
-        used = maxChars;
+        used = limit;
       }
       break;
     }
@@ -418,11 +376,22 @@ export function readByIds(arg) {
  * 摘要写的是「覆盖: m_xxx +N（不连续）」，那段正则匹配不到。保留是为了
  * 兼容历史摘要文件，新数据靠下面的全量 id 扫描兜住。
  */
+/** 摘要引用集合的缓存（目录未变时复用），键是文件列表 + 大小 + mtime。 */
+let citedCache = { key: '', value: null };
+
 function digestCited(digestDir) {
   const s = new Set();
   if (!digestDir || !existsSync(digestDir)) return s;
+  // 每次搜索都全量重读摘要目录是纯浪费；用「文件名 + 大小 + mtime」做键缓存。
+  let key = digestDir;
+  const files = [];
   for (const fn of readdirSync(digestDir)) {
     if (!fn.endsWith('.md')) continue;
+    try { const st = statSync(join(digestDir, fn)); files.push(fn); key += `|${fn}:${st.size}:${st.mtimeMs}`; }
+    catch { /* 读不到就跳过，下次键自然会变 */ }
+  }
+  if (citedCache.key === key && citedCache.value) return citedCache.value;
+  for (const fn of files) {
     const t = readFileSync(join(digestDir, fn), 'utf8');
     for (const m of t.matchAll(/m_(\d{8})_([0-9a-f]{6})\.\.m_\d{8}_([0-9a-f]{6})/g)) {
       const from = +m[2], to = +m[3];
@@ -432,6 +401,7 @@ function digestCited(digestDir) {
     }
     for (const id of t.match(/m_[0-9]{8}_[0-9a-f]{6}/g) || []) s.add(id);
   }
+  citedCache = { key, value: s };
   return s;
 }
 
@@ -514,8 +484,8 @@ export function searchAll(arg) {
     throw new TypeError('searchAll 的参数改成了对象形式：searchAll({ memDir, pattern, maxHits, digestDir })');
   }
   const { memDir, pattern, ...opts } = arg || {};
-  const maxHits = typeof opts.maxHits === 'number' ? opts.maxHits : 10;
-  const win = typeof opts.window === 'number' ? opts.window : 130;
+  const maxHits = Number.isFinite(opts.maxHits) ? Math.max(1, Math.min(100, Math.floor(opts.maxHits))) : 10;
+  const win = Number.isFinite(opts.window) ? Math.max(0, Math.min(1000, Math.floor(opts.window))) : 130;
   const digestDir = opts.digestDir || null;
   const stateMap = opts.stateMap || null;   // memoryId -> 'active'|'cold'|'archived'
 
@@ -532,30 +502,15 @@ export function searchAll(arg) {
   const cited = digestCited(digestDir);
 
   const days = listDays({ memDir, digestDir }).slice().reverse();
-  const blocks = [];
-  const HEAD = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+［(.+?)］(?:\s*<!--\s*(m_[0-9]{8}_[0-9a-f]{6})\s*-->)?\s*$/;
-
-  for (const day of days) {
-    const p2 = join(memDir, `${day}.md`);
-    if (!existsSync(p2)) continue;
-    const raw = readFileSync(p2, 'utf8');
-    let cur = null;
-    let seq = 0;
-    for (const line of raw.split(/\r?\n/)) {
-      const mm = HEAD.exec(line);
-      if (mm) {
-        if (cur) blocks.push(cur);
-        // 同上：只给缺锚点的条目递增
-        const anchored = mm[4];
-        if (!anchored) seq += 1;
-        cur = {
-          id: anchored || `m_${day.replace(/-/g, '')}_${String(seq).padStart(6, '0')}`,
-          day, time: mm[2], body: [],
-        };
-      } else if (cur) cur.body.push(line);
-    }
-    if (cur) blocks.push(cur);
-  }
+  const wantedDays = new Set(days);
+  const blocks = readEntries(memDir)
+    .filter((entry) => wantedDays.has(entry.day))
+    .map((entry) => ({
+      id: entry.id,
+      day: entry.day,
+      time: entry.hhmm,
+      body: entry.text ? [entry.text] : [],
+    }));
 
   // 每个 block 预先算「包含哪些词、各几次」
   const bag = blocks.map((b) => {
@@ -578,10 +533,36 @@ export function searchAll(arg) {
   //
   // 新做法：含任一词就进池，然后用 coverage（命中词数占比）加权 ——
   // 全命中的仍然排前面，但只命中关键词的也有机会。
-  const use = use0.slice();
-  const hitBag = bag.filter((x) => use.some((w) => x.cnt.get(w) > 0));
-  const mode = 'OR-WEIGHTED';
+  let use = use0.slice();
+  let hitBag = bag.filter((x) => use.some((w) => x.cnt.get(w) > 0));
+  let mode = 'OR-WEIGHTED';
   const relaxed = 0;
+  // 中文没有空格：整串查询（「缓存排查记录」）在原文里往往不连续出现，
+  // 整词匹配等于零命中。此时退回 CJK 二元切分，走同一套加权 OR。
+  if (!hitBag.length) {
+    const cjk = use0.filter((w) => /^[\u4e00-\u9fa5]{4,}$/.test(w));
+    if (cjk.length) {
+      const grams = new Set();
+      for (const w of cjk) for (let i = 0; i < w.length - 1; i++) grams.add(w.slice(i, i + 2));
+      use = [...grams];
+      hitBag = bag.filter((x) => {
+        for (const w of use) {
+          const { re } = makeMatcher(w);
+          if (new RegExp(re.source, 'i').test(x.text)) return true;
+        }
+        return false;
+      }).map((x) => {
+        const cnt = new Map();
+        for (const w of use) {
+          const { re } = makeMatcher(w);
+          const ms = x.text.match(new RegExp(re.source, 'gi'));
+          cnt.set(w, ms ? ms.length : 0);
+        }
+        return { ...x, cnt };
+      });
+      if (hitBag.length) mode = 'CJK-BIGRAM';
+    }
+  }
   if (!hitBag.length) return { hits: [], total: 0, mode: 'none', relaxed };
 
   // 元描述降权：压缩摘要 / 技术报告这类整段复述里塞满了所有关键词，

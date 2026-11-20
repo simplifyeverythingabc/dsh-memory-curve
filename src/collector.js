@@ -6,6 +6,8 @@ import { setImmediate as yieldLoop } from 'node:timers/promises';
 
 const BEGIN = '<!-- dsh-note:auto-begin:7f3a -->';
 const END = '<!-- dsh-note:auto-end:7f3a -->';
+const LITERAL_HEAD = '<!-- dsh-note:literal-head:7f3a -->';
+const DAY_HEAD = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+［.+?］(?:\s*<!--\s*m_[0-9]{8}_[0-9a-f]{6}\s*-->)?\s*$/;
 const HEAD = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) ［([^\n]+?)］(?:\s*<!--\s*(m_\d{8}_[0-9a-f]{6})\s*-->)?\s*$/gm;
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const pad = (n) => String(n).padStart(2, '0');
@@ -198,7 +200,10 @@ function blocksIn(text) {
   const blocks = hits.map((h, i) => {
     const raw = text.slice(h.index, hits[i + 1]?.index ?? text.length).trimEnd();
     return { raw, id: h[4], who: h[3], time: `${h[1]} ${h[2]}`,
-      text: raw.slice(h[0].length).replace(/<!-- memory-source:[0-9a-f]{64} -->\s*/g, '').trim(),
+      text: raw.slice(h[0].length)
+        .replace(/<!-- memory-source:[0-9a-f]{64} -->\s*/g, '')
+        .split(LITERAL_HEAD).join('')
+        .trim(),
       source: raw.match(/<!-- memory-source:([0-9a-f]{64}) -->/)?.[1] };
   });
   return { blocks, orphans };
@@ -227,7 +232,13 @@ async function mergeDay(memDir, day, messages) {
   for (const m of messages) {
     const source = sha(`${m.sessionId}\0${m.seq}`);
     if (sources.has(source)) continue;
-    const safe = m.text.split(/\r?\n/).map(line => line.replace(/<!--\s*(dsh-note:auto-(?:begin|end):7f3a|memory-source:)/g, '&lt;!-- $1')).join('\n');
+    // Escape marker-like text and neutralise body lines that look exactly like a
+    // day header. Without the marker, such a line re-parses as a new entry on the
+    // next merge: the real block is split, and a phantom cross-date entry appears.
+    const safe = m.text.split(/\r?\n/).map((line) => {
+      const escaped = line.replace(/<!--\s*(dsh-note:auto-(?:begin|end):7f3a|memory-source:)/g, '&lt;!-- $1');
+      return DAY_HEAD.test(line) ? LITERAL_HEAD + escaped : escaped;
+    }).join('\n');
     const legacyId = `m_${day.replace(/-/g, '')}_${createHash('sha1').update(m.text).digest('hex').slice(0, 6)}`;
     const legacy = ids.get(legacyId);
     // Upgrade without renaming existing anchors. Only legacy content-addressed records are adopted.
@@ -268,7 +279,8 @@ export function createCollector({ memDir, sessionsDir, includeSubagents = false,
     status.running = true;
     try {
       const outputDir = getDir(); // A volatile Config change takes effect on the next pass, never halfway through a commit.
-      return await withLock(outputDir, async (dir) => {
+      let refreshDays = [];
+      const result = await withLock(outputDir, async (dir) => {
         const stateFile = path.join(dir, 'state.json');
         const raw = await textOrEmpty(stateFile);
         const state = raw ? JSON.parse(raw) : emptyState();
@@ -347,16 +359,27 @@ export function createCollector({ memDir, sessionsDir, includeSubagents = false,
           }
           if (messages.length || JSON.stringify(done) !== JSON.stringify(state.done)) await commit(messages, () => { state.done = done; });
         }
-        if (refresh && state.dirtyDays.length) {
-          await onDirty([...state.dirtyDays], outputDir);
-          await fault('after-summary');
-          state.dirtyDays = [];
-          await save();
-        }
+        if (refresh && state.dirtyDays.length) refreshDays = [...state.dirtyDays];
         status.added += added; status.pendingDays = state.dirtyDays.length;
         status.lastSuccess = state.lastSuccess; status.lastError = null;
         return { added, scanned, pendingDays: state.dirtyDays.length };
       });
+      // Summary generation can read and write the same memory directory. Do it
+      // outside the collector lock, then clear only the days that were refreshed.
+      if (refreshDays.length) {
+        await onDirty(refreshDays, outputDir);
+        await fault('after-summary');
+        await withLock(outputDir, async (dir) => {
+          const stateFile = path.join(dir, 'state.json');
+          const raw = await textOrEmpty(stateFile);
+          const state = raw ? JSON.parse(raw) : emptyState();
+          state.dirtyDays = (state.dirtyDays || []).filter((day) => !refreshDays.includes(day));
+          await writeAtomic(stateFile, JSON.stringify(state));
+          status.pendingDays = state.dirtyDays.length;
+          return state;
+        });
+      }
+      return { ...result, pendingDays: status.pendingDays };
     } catch (e) { status.lastError = String(e.message || e); throw e; }
     finally { status.running = false; }
   }
