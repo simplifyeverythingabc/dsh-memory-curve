@@ -676,6 +676,9 @@ dsh-memory-curve/
 │   ├── bench.mjs               检索基准
 │   ├── collector-test.mjs      采集器单测
 │   ├── collector-host-test.mjs 宿主事件形状单测
+│   ├── persist-test.mjs        持久化索引 42 项边界回归
+│   ├── id-repair-test.mjs      重复 ID 归一化
+│   ├── regression-test.mjs     伪头部 / CJK 检索 / 标记泄漏回归
 │   ├── export-code.mjs         导出《记忆插件完整代码.md》
 │   ├── setup-dev.mjs           造 schemastery stub（本地与 CI 共用）
 │   └── manifest.mjs            仓库文件清单（check 与 export 共用一份）
