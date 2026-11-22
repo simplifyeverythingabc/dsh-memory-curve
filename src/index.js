@@ -44,6 +44,19 @@ import { mountAutoCollector, writeAtomic } from './collector.js';
 
 export const name = 'memory-curve';
 
+// `compaction` 是 0.16.4 加的，用来验证「模型主动压缩历史」能不能做。
+//
+// 已知风险：cordis 的 inject 是 **required**，服务不可达时插件会无限等待。
+// profile 的 cordis.patch.yml L205-214 记着一段历史 —— 在**预设作用域**里，
+// inject:['sessions'] / inject:[] / inject:['compaction'] 三种写法全失败，
+// 最后连带会话 resume 一起挂。
+//
+// 但那是**预设作用域**。本插件挂在 bundle 层的全局 patch，
+// 而 compaction-basic 也挂在同一层的全局 patch（L416），所以这里可能拿得到。
+//
+// 失败怎么发现：apply 一进来就写 _compaction-probe.json。
+//   文件更新 → 插件加载成功
+//   文件时间戳不动 → 插件在 waiting，没跑起来（那时系统提示里也不会有记忆索引）
 export const inject = ['systemPrompt', 'tools'];
 
 /**
@@ -657,6 +670,7 @@ export function apply(ctx, config = {}) {
       writeFileSync(f, JSON.stringify({
         at: new Date().toISOString(),
         plugin: 'dsh-memory-curve',
+        injectCompaction: true,
         probe: line,
         hasCompaction: Boolean(svc),
         methods: svc ? {

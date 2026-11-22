@@ -13,6 +13,76 @@
 
 ---
 
+## [0.16.5] - 2026-11-22
+
+**实测结论：`compaction` 服务在 bundle 层也拿不到。回滚。**
+
+### 试了什么
+
+0.16.4 把 `inject` 改成：
+
+```js
+export const inject = ['systemPrompt', 'tools', 'compaction'];
+```
+
+依据是 `dsh-compaction/src/index.ts:119` 确实提供了 `ctx.compaction.compactRegion(start, end, agent, signal)`，
+而 `compaction-basic` 和本插件都挂在 **bundle 层的全局 patch**，看起来是同一个 scope。
+
+### 结果：插件静默不加载
+
+两条独立证据：
+
+```
+① 系统提示里【记忆索引】整段消失 —— 插件根本没 active
+② _compaction-probe.json 时间戳停在 19:34:33（重启前），没更新
+   → apply() 一次都没被调用
+```
+
+**没有报错、没有崩溃，就是安静地不加载。** 这比报错更难发现 —— 如果我不写那个探测文件，只看「会话还能用」就会以为成功了。
+
+### 这跟之前那条记录对上了
+
+profile 的 `cordis.patch.yml` L205-214 记着（whale-history-window 那次）：
+
+```
+inject:['sessions']   → 读 ctx.compaction 非法，异常被吞
+inject:[]             → 加载即抛，resume failed
+inject:['compaction'] → 永远「waiting for compaction」，resume failed
+```
+
+**那是预设作用域。这次是 bundle 层全局 patch —— 结果一样不行。**
+
+唯一的区别：preset 作用域会把会话 resume 一起拖挂，bundle 层是自己静默不加载。
+
+### 根因
+
+cordis 的 `inject` 是 **required + 静态声明**（`registry.ts:296`：*required services*）。
+服务不在当前 scope 里，插件就无限等待，没有「可选注入」这回事。
+
+**想用 `compactRegion`，得宿主层面把 `compaction` 暴露到插件 scope，不是配置能绕的。**
+
+### 回滚
+
+`inject` 改回 `['systemPrompt', 'tools']`，并把那段注释改写成**实测记录**而不是猜测。
+
+探测块留着 —— 它现在每次会写出 `hasCompaction: false`，那正是事实，留作证据。
+
+### 这一轮值不值
+
+值。**花两轮重启换来一个确定的「不行」**，而且中间顺手发现了我自己两个毛病：
+
+1. **0.16.2 用 `console.log` 做探测** —— Desktop 是 GUI，没终端接，白重启一次
+2. **0.16.4 靠猜测推结论** —— "bundle 层应该跟 preset 不一样"，结果一样
+
+第 2 条尤其值得记：**它不是没验证，是验证方向反了** —— 我在赌它能成，而不是先证明它在。
+
+### 现在的状态
+
+`compaction` 这条路**封了**。MemGPT 式「模型主动压缩历史」在 DSH 0.2.2-rc.5 的插件层面做不了。
+
+但**「模型主动让记忆沉底」还有另一条路**：不是压历史，而是**用一张表标记哪些不用再提**。这个插件本来就在做（分级 + 遗忘曲线），只是它自动决定，不是模型手动决定。
+
+---
 ## [0.16.3] - 2026-11-22
 
 **探测结果落文件 —— 上一版靠 `console.log` 是白重启了一回。**
