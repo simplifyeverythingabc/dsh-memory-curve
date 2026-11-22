@@ -1206,6 +1206,30 @@ try {
 
   // ── 报告
   console.log('');
+  // ── 配额一致性 ────────────────────────────────────────────────────
+  //
+  // 这个坑踩过两次，两次都是同一个根因：**同一个数写在两处，谁生效没搞清**。
+  //
+  //   0.15.0  `cordis.patch.yml` 里写死 12/20/8，改 src 里的默认值等于没改，
+  //           真机注入一直 834 token 而不是测出来的 690。
+  //   0.15.5  `MAX_THREADS` 从 3 改成 2，但 `Config.maxThreads` 还写着 `.default(3)`。
+  //           schemastery 会先用 `.default()` 把 config 填满，于是
+  //           `num(config.maxThreads, MAX_THREADS, 20)` 的兜底值**永远拿不到** ——
+  //           主题线一直显示 3 条，常量白写。
+  //
+  // **真正生效的是 schema 的 .default()，不是代码常量。** 这条断言就是防它俩漂。
+  try {
+    const { Config } = await import('../src/index.js');
+    const want = { maxL1: 6, maxL2: 8, maxL3: 3, maxThreads: 2 };
+    const diffs = [];
+    for (const [k, v] of Object.entries(want)) {
+      const got = Config?.dict?.[k]?.meta?.default;
+      if (got !== v) diffs.push(`${k}: schema=${got} 期望=${v}`);
+    }
+    if (diffs.length) fail('配额一致性', diffs.join('；'));
+    else ok('配额一致性', 'L1/L2/L3/threads = 6/8/3/2，schema 与常量一致');
+  } catch (e) { fail('配额一致性', String((e && e.message) || e)); }
+
   console.log(`  检查项 ${rows.length}　通过 ${rows.length - failed}　失败 ${failed}`);
 } catch (e) {
   const msg = String((e && e.message) || e);

@@ -119,7 +119,7 @@ export const Config = z.object({
     .number()
     .min(0)
     .max(20)
-    .default(3)
+    .default(2)
     .description('「主题线」最多列几条（把同一条线索上的多个事件压成一行）。设 0 关闭这一段。'),
   autoCollect: z.boolean().default(false).description('启用会话消息自动采集、启动补漏和摘要刷新；只保存用户与助手正文。'),
   collectSubagents: z.boolean().default(false).description('自动采集是否包含子代理；默认排除，不影响已有流水。'),
@@ -272,7 +272,19 @@ function saveThreadLabels(store, liveKeys) {
   }
 }
 
-/** 注入配额（0.15.0 收紧）。实测每 step 都要付这份 token，见 README「成本」一节。 */
+/**
+ * 注入配额的「期望值」。
+ *
+ * ⚠️ **这些常量不决定运行时行为** —— schemastery 会先用 `Config` 里的 `.default()`
+ * 把 config 填满，所以 `num(config.maxX, MAX_X, …)` 里的兜底值**永远拿不到**。
+ *
+ * 真正生效的是 `Config` 声明里的 `.default()`。这里放一份是为了：
+ *   ① 有个地方能一眼看出「现在配额是多少」
+ *   ② `selftest` 会断言两者一致，防它们漂
+ *
+ * 已经漂过一次：0.15.0 把 MAX_THREADS 改成 2，但 Config.maxThreads 还是 .default(3)，
+ * 于是主题线一直显示 3 条，改了个寂寞。
+ */
 const MAX_L1 = 6, MAX_L2 = 8, MAX_L3 = 3, MAX_THREADS = 2, INDEX_DAYS = 5;
 
 const PAD = (n) => String(n).padStart(2, '0');
