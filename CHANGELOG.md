@@ -13,7 +13,92 @@
 
 ---
 
-## [0.16.1] - 2026-11-22
+## [0.16.2] - 2026-11-22
+
+**加一条只读探测：这个 scope 里能不能拿到 `compaction` 服务。**
+
+### 起因：我上一轮说错了一句
+
+我在网上找借鉴方案时写：「MemGPT 那套分页**不行**——这要求模型能自己控制上下文；DSH 插件拿不到这个权限」。
+
+**这个判断是凭印象下的，没查 API。**
+
+查了 `@deepseek-ai/dsh-compaction/src/index.ts:119`（DSH 0.2.2-rc.5）：
+
+```ts
+export abstract class CompactionEngine extends Service {
+  constructor(ctx: Context) {
+    super(ctx, 'compaction')          // ← 服务名就是 compaction
+  }
+  abstract compactRegion(
+    start: SessionSeq,                 // 起始 surface seq，含
+    end: SessionSeq,                   // 结束 surface seq，含
+    agent: CompactionAgentContext,
+    signal?: AbortSignal,
+  ): Promise<CompactionResult>
+}
+```
+
+**服务名是 `compaction`，有 `compactRegion(start, end, agent, signal)`** ——
+能由**调用方指定** surface 范围压成一条摘要。这正是 MemGPT 需要的入口。
+
+**所以「拿不到」是错的。**
+
+### 真正的差别在别处
+
+| | MemGPT | DSH `compactRegion` |
+|---|---|---|
+| 换出 | 旧消息 → 页引用 | 旧 span → **一条 user 摘要** |
+| **换回** | **页引用可解引用换回原文** | **没有这个 API** |
+| 原文 | 外部存储 | session log 里（`deriveMessages` 只渲染摘要） |
+
+**MemGPT 的核心是「能换回来」。** DSH 的压缩是**单向**的：压完只剩一条摘要，
+模型看不到原文，只能靠 `memory_curve_raw` 这类工具去翻。
+
+外加三个硬约束（源码注释）：
+
+1. `both edges must be balanced so assistant tool calls remain paired with their results`
+2. `throws when compaction is active` —— 有锁，同一 session 不能并发
+3. `The target session is agent.session` —— 只能压当前 agent 自己的会话
+
+### 为什么用探测而不是直接 inject
+
+cordis 的 `inject` 是 **required**（`registry.ts:296` 原话：*required services*），
+服务在某个 scope 里不可达时插件会**无限等待**，连会话 resume 一起拖挂 ——
+0.13.x 在预设作用域里踩过一次（见 `whale-history-window` 那段的记录）。
+
+所以这里**不声明 `inject`**，改成 try/catch 只读探测：
+
+```js
+ctx.get('compaction')   // 非阻塞，服务不存在返回 undefined
+ctx.compaction
+```
+
+拿到什么打什么，探测失败不影响插件。
+
+### 重启后看日志
+
+```
+[memory-curve] compaction 探测: ...
+```
+
+三种结果对应三条路：
+
+| 日志 | 含义 | 下一步 |
+|---|---|---|
+| `ctx.get=object | 方法: compactRegion=function` | **这个 scope 拿得到** | 可以做「模型主动压缩」类工具 |
+| `ctx.get=undefined | ctx.compaction=undefined` | 拿不到 | 维持现状，走工具反查 |
+| 抛错 | 访问方式不对 | 换 `ctx.reflect.get` 等写法再试 |
+
+### 这不是功能
+
+只是一次探测。拿到结果再决定要不要做，别又像 0.15.0 那样改了没生效还以为生效了。
+
+### 验证
+
+`check` 25/0、`selftest` 68/68。本地 stub 跑过 `apply`，探测代码不抛错。
+
+---## [0.16.1] - 2026-11-22
 
 **同一个坑的第二次：`maxThreads` 的两套默认值又漂了。**
 

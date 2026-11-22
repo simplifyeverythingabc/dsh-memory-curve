@@ -616,6 +616,42 @@ export function apply(ctx, config = {}) {
   liveConfig = config;
   ensureConfiguredDir();
 
+  // ── 探测：能不能拿到 compaction 服务（0.16.2）─────────────────────
+  //
+  // 目的：验证「MemGPT 式主动压缩」在 bundle 层到底做不做得到。
+  // `dsh-compaction` 暴露 `ctx.compaction.compactRegion(start, end, agent, signal)`，
+  // 能由调用方指定 surface 范围压成一条摘要 —— 这正是 MemGPT 需要的入口。
+  //
+  // **但这里刻意不声明 `inject: ['compaction']`**：cordis 的 inject 是 **required**，
+  // 服务在某个 scope 里不可达时插件会无限等待，连会话 resume 一起拖挂
+  // （0.13.x 在预设作用域里踩过一次，见 whale-history-window 那段的记录）。
+  //
+  // 所以用 try/catch 只读探测几种访问方式，拿到什么打什么。探测失败不影响插件。
+  try {
+    const probe = [];
+    const got = (fn, label) => {
+      try {
+        const v = fn();
+        probe.push(`${label}=${v ? typeof v : 'undefined'}`);
+        return v || null;
+      } catch (e) {
+        probe.push(`${label} 抛错:${String((e && e.message) || e).slice(0, 60)}`);
+        return null;
+      }
+    };
+    const viaGet = typeof ctx?.get === 'function'
+      ? got(() => ctx.get('compaction'), 'ctx.get')
+      : (probe.push('ctx.get=非函数'), null);
+    const direct = got(() => ctx?.compaction, 'ctx.compaction');
+    const svc = viaGet || direct;
+    if (svc) {
+      probe.push(`方法: compactRegion=${typeof svc.compactRegion} compactNow=${typeof svc.compactNow} compactIfNeeded=${typeof svc.compactIfNeeded}`);
+    }
+    console.log('[memory-curve] compaction 探测: ' + probe.join(' | '));
+  } catch (e) {
+    console.log('[memory-curve] compaction 探测异常: ' + String((e && e.message) || e));
+  }
+
   // ── 语义向量（0.12.0）──────────────────────────────────────────────
   // **后台加载，失败静默降级**。没装 @xenova/transformers、没网、镜像也挂 —— 都只是
   // 退回字符匹配，绝不抛。首次要下 ~100 MB（实测 33.8 秒），之后本地加载几秒；
