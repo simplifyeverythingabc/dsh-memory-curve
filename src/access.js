@@ -24,7 +24,7 @@
  * 关键：**任何状态都不物理删除**。deleted 只有用户明确要求才发生，
  * 而且这个模块不负责删，只负责标记。
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export const COLD_AFTER_DAYS = 14;    // 超过这么久没被查过 -> cold
@@ -73,9 +73,20 @@ function load(file) {
 }
 
 function flush(file, data) {
+  // 原子写：同 persist.js / embed.js / index.js 的 _threads.json。
+  //
+  // 0.17.2 之前这里是直接 writeFileSync(file, ...)：写到一半崩掉（断电、OOM、
+  // 进程被强杀）会留下半截 JSON，而 load() 的 `catch { cache = {} }` 会把它**静默
+  // 当成空表** —— 于是全部访问记录、抑制量、以及 0.17.0 加的沉底标记一起消失，
+  // 而且一声不吭。这个文件里现在有「哪些记忆不用再提」的人工决策，
+  // 丢了就是丢了，重建不回来。
+  //
+  // 这个仓库里另外三处写盘都是 tmp+rename，只有这里漏了，属于不一致。
   try {
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify(data), 'utf8');
+    const tmp = `${file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(data), 'utf8');
+    renameSync(tmp, file);
     return true;
   } catch {
     return false;

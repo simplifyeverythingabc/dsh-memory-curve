@@ -371,8 +371,14 @@ export function build(now = Date.now()) {
         const idx = loadIndex(eventsFile());
         if (idx) {
           const plan = planReuse(idx.files, files);
-          // 'none' 一个文件都没变 → 事件全可直接用
-          // 'tail' 只有末尾几天变了 → 前缀复用，只重算尾部
+          // 'none'（一个文件都没变）和 'tail'（只有末尾几天变了）在这里**走同一条路**：
+          // 都交给 clusterEvents 的 seed —— 它复用全部旧事件，从最后一个事件的
+          // endIdx+1 接着聚类，新条目通过「延长最后一个未封口事件」并入。
+          // 只有 'full'（中间某天变了 / 文件被删）才放弃索引。
+          //
+          // 0.14.x 的注释这里写着「'tail' 只重算尾部」，但当时没有任何代码实现
+          // 那个分支，`tailFromDay` 也从没被读过。注释描述了不存在的行为，
+          // 已经在 persist.js 的 planReuse 里一并改正。
           if (plan.mode !== 'full') {
             seed = { entryCount: idx.entryCount, events: idx.events };
             seedFiles = idx.files;

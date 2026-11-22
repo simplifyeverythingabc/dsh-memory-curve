@@ -83,11 +83,25 @@ export function scanFiles(memDir) {
 }
 
 /**
- * 判断索引能复用到哪：
+ * 判断索引能复用到哪。
  *
- * @returns {{ mode: 'full'|'tail'|'none', seedCount?: number, tailFromDay?: string }}
- *   'none' 索引完全可用（一个文件都没变）
- *   'tail' 只有末尾连续几天变了，可用 seed + 重算尾部
+ * ⚠️ 关于 `mode`：调用方（`index.js`）只判 `!== 'full'`，也就是
+ * **'none' 和 'tail' 的处理完全一样** —— 两者都交给 `clusterEvents` 的 seed 路径。
+ *
+ * 这是对的，不是偷懒：seed 路径本身就能处理「末尾几天变化」——
+ * 它复用全部旧事件，然后从 `最后一个事件的 endIdx + 1` 接着聚类，
+ * 新条目通过「延长最后一个未封口事件」并入。所以**不需要**单独的 tail 分支。
+ *
+ * 0.14.x 的这里曾经返回一个 `tailFromDay`，但从来没人读过它 ——
+ * 那个字段已删除。留着死字段 + 一条描述「只重算尾部」的注释，
+ * 只会让下一个读代码的人以为存在一条不存在的快路径。
+ *
+ * `mode` 保留三值仍然有意义：它让 `planReuse` 的判断可测（测试要能断言
+ * 「中间某天变了 → full」），调用方只是不区分 none 与 tail。
+ *
+ * @returns {{ mode: 'full'|'tail'|'none' }}
+ *   'none' 一个文件都没变
+ *   'tail' 只有末尾若干文件变了（中间变了或文件被删会返回 'full'）
  *   'full' 必须全量重建
  */
 export function planReuse(cached, current) {
@@ -111,7 +125,7 @@ export function planReuse(cached, current) {
   const firstChanged = changed[0];
   if (firstChanged < lastCached) return { mode: 'full' };
 
-  return { mode: 'tail', tailFromDay: firstChanged.slice(0, 10) };
+  return { mode: 'tail' };
 }
 
 /** 读索引。返回 null 表示没有可用索引。 */
@@ -121,13 +135,20 @@ export function loadIndex(file) {
     if (!o || o._v !== INDEX_VERSION) return null;
     if (!Array.isArray(o.events) || !Number.isSafeInteger(o.entryCount)) return null;
     if (!o.files || typeof o.files !== 'object') return null;
-    // 内容校验：每个事件都必须带 toks 数组。
-    // 0.14.0/0.14.1 写出的索引没有它，读回来会让分级全塌 L5，
-    // 而且**不会报错**。宁可全量重建一次，也不要拿一份算不对的索引。
-    // （版本号已升到 2 把它们挡在门外，这里再兜一层，防止将来又漏字段。）
+    // 内容校验：每个事件都必须带 toks / entities 数组。
+    //
+    // toks：0.14.0/0.14.1 写出的索引没有它，读回来会让分级全塌 L5，而且**不会报错**。
+    //       （版本号已升到 2 把它们挡在门外，这里再兜一层，防止将来又漏字段。）
+    //
+    // entities：原来只校验了 toks，没校验它。后果不是崩 —— 下面是
+    //       `new Set(e.entities || [])`，如果它是对象（比如旧版本写成 `{}`），
+    //       `new Set({})` 抛 "is not iterable"，被外层 catch 吞掉返回 null，
+    //       于是每次启动都静默全量重建。慢，而且没人知道为什么慢。
+    //       两个 Set 字段一起校验，才算把「索引完整性」验完。
     if (!o.events.length) return null;
     for (const e of o.events) {
       if (!Array.isArray(e.toks)) return null;
+      if (!Array.isArray(e.entities)) return null;
     }
 
     const events = o.events.map((e) => {

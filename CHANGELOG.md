@@ -13,6 +13,126 @@
 
 ---
 
+## [0.17.3] - 2026-11-22
+
+**代码审查：两个确认问题 + 一条守死字段的假测试。**
+
+### 一、`_access.json` 是非原子写（真问题，会丢数据）
+
+`src/access.js` 的 `flush()` 原来直接：
+
+```js
+writeFileSync(file, JSON.stringify(data), 'utf8');
+```
+
+而这个仓库里**另外三处写盘都是 tmp+rename**：`persist.js`、`embed.js`、`index.js`（`_threads.json`）。只有这里漏了。
+
+后果不是「可能丢一条访问计数」：
+
+```js
+catch { cache = {}; }    // load() 里的这行
+```
+
+写到一半崩掉（断电 / OOM / 进程被强杀）→ 留下半截 JSON → **下次静默当空表**。丢的是整个 `_access.json`：访问计数、抑制量，**以及 0.17.0 加的沉底标记**。
+
+沉底标记是**人工决策**——「这件事结案了，别再提」。丢了不会自己回来，而系统一声不吭。
+
+改成 tmp+rename，跟其余三处一致。这也是为什么它一直没被发现：**它不报错，只是悄悄变慢、悄悄忘事。**
+
+### 二、`planReuse` 返回一个从没被读过的字段
+
+`persist.js` 的 `planReuse` 原来返回：
+
+```js
+return { mode: 'tail', tailFromDay: firstChanged.slice(0, 10) };
+```
+
+`tailFromDay` **全仓库没有任何地方读过**（`index.js` 只判 `plan.mode !== 'full'`）。
+
+而 `index.js:374` 的注释写着：
+
+```
+// 'tail' 只有末尾几天变了 → 前缀复用，**只重算尾部**
+```
+
+**那条「只重算尾部」的路径从来不存在。** 实际行为是 `'tail'` 和 `'none'` 走同一条路——都交给 `clusterEvents` 的 seed。
+
+而且这样是**对的**，不是缺陷：seed 复用全部旧事件，从「最后一个事件的 `endIdx + 1`」接着聚类，新条目通过延长最后一个未封口事件并入。**本来就不需要单独的 tail 分支。**
+
+修法：删字段、把注释改成事实。`mode` 三值保留（测试要能断言「中间某天变了 → full」），只是调用方不区分 none 与 tail。
+
+### 三、守死字段的假测试
+
+`tools/persist-test.mjs:68`：
+
+```js
+ok('tailFromDay 正确', plan1.tailFromDay === '2026-11-11', plan1.tailFromDay);
+```
+
+这条测试**一直绿着，但守的是一个没人读的字段**。删字段后它挂了——这才暴露出来：它守的是实现细节，不是行为。
+
+改成：
+
+```js
+ok('tail 模式判定正确', plan1.mode === 'tail');
+ok('不再返回死字段 tailFromDay', !('tailFromDay' in plan1));
+```
+
+第二条防止有人把那个「只重算尾部」的承诺加回来又不实现。
+
+### 四、`loadIndex` 校验不对称
+
+```js
+for (const e of o.events) {
+  if (!Array.isArray(e.toks)) return null;    // 校了
+  // entities 没校
+}
+```
+
+`entities` 不是数组时，下面 `new Set(e.entities || [])` 会抛 `is not iterable`，被外层 catch 吞掉返回 `null` → **每次启动静默全量重建**。慢，而且没人知道为什么慢。
+
+两个 Set 字段一起校验。
+
+### 审查覆盖范围
+
+**扫过的模式**（全 `src/`）：
+
+- 空 catch：5 处，都有注释说明为什么可以吞（定时器清理、可选降级）
+- 文件 IO：`readFileSync` / `writeFileSync` / `renameSync` 全部定位过 → 发现上面第 1 条
+- 定时器：`collector.js` 的 `setTimeout` / `setInterval` 都有 `clearTimeout` / `clearInterval`
+- 异步：`collector.js` 的 handle 全部 `finally { await handle.close(); }`
+- 参数边界：`collector.js:77` 对 `time` / `seq` 有完整校验（`NaN`、非 safe integer、非法日期全挡）
+- 持久化：`persist.js` 全文精读
+- seed 增量：`clusterEvents` 的复用分支精读，确认 `endIdx < p` 与 `cur` 延长逻辑正确
+
+**没发现的**：资源泄漏、并发竞争（JS 单线程 + 同步写，且写入路径都有锁或原子写）、明显除零。
+
+### 明确标注为「未统一但不算 bug」的
+
+工具层异常处理不一致：`memory_search` 的 execute 有 try，`memory_curve_raw` 的整体没有。异常传播到宿主让模型看到错误是**合理的**（吞掉反而更糟），所以没改。只是不一致，不是缺陷。
+
+### 验证
+
+```
+check      26 文件 / 0 失败
+selftest   68 / 68
+persist    43 / 43   ← 从 42 涨到 43（多了守门断言）
+shelve     10 / 10
+collector  23 / 23
+recall     B 组零命中 0.0%
+bench      33 / 33
+```
+
+原子写实测：
+
+```
+写入后目录: _access.json
+残留 tmp 文件: 无 ✓
+内容可解析: ✓  shelf={"at":...,"reason":"测试"}
+半截 JSON 时 stats 不抛: ✓ n=0
+```
+
+---
 ## [0.17.2] - 2026-11-22
 
 **`memory_shelve` 两个可用性问题，都是实测才发现的。**

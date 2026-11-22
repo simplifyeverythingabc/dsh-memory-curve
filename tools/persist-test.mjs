@@ -65,7 +65,13 @@ console.log('  ── 3. planReuse 判定 ──');
 writeFileSync(join(DIR, '2026-11-11.md'), mkMd('2026-11-11', ['第二天消息']));
 const plan1 = planReuse(i1.files, scanFiles(DIR));
 ok('末尾新增一天 → tail', plan1.mode === 'tail', plan1.mode);
-ok('tailFromDay 正确', plan1.tailFromDay === '2026-11-11', plan1.tailFromDay);
+ok('tail 模式判定正确', plan1.mode === 'tail', 'mode=' + plan1.mode);
+// 原来这里断言 `plan1.tailFromDay === '2026-11-11'`，守的是一个**没人读的字段**。
+// 它一直绿着，但那份「绿」没有任何意义 —— 删掉字段后测试挂了，才暴露出来：
+// 这条测试守的是实现细节，不是行为。现在守两件事：
+//   ① mode 判定正确（真实行为）
+//   ② 死字段不许回来（防止有人加回一个没人实现的「只重算尾部」承诺）
+ok('不再返回死字段 tailFromDay', !('tailFromDay' in plan1), Object.keys(plan1).join(','));
 
 const snapA = { '2026-11-10.md': { size: 1, mtimeMs: 1 }, '2026-11-11.md': { size: 1, mtimeMs: 1 } };
 ok('同快照 → none', planReuse(snapA, snapA).mode === 'none');
