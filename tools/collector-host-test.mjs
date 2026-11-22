@@ -30,7 +30,19 @@ test('插件真实 apply 接线：消息事件 -> 异步落盘 -> 摘要 -> 上�
   };
   try {
     apply(ctx, { autoCollect: true, collectFlushMs: 100, collectScanMs: 1000, collectSummaryMs: 100 });
-    assert.equal(tools.size, 6);
+    // 断言**具体工具名**，不是数量。
+//
+// 写死 `assert.equal(tools.size, 6)` 的毛病：加一个工具就挂，而**
+// 少一个工具反而可能不挂** —— 方向搞反了。这个断言要守的是
+// 「该注册的都注册了」，不是「正好 6 个」。
+for (const name of [
+  'memory_curve_days', 'memory_search', 'memory_curve_day',
+  'memory_curve_raw', 'memory_curve_build', 'memory_curve_show',
+  'memory_shelve',
+]) {
+  assert.ok(tools.has(name), '缺工具: ' + name);
+}
+assert.equal(tools.size, 7, '注册了预期之外的工具（数量 ' + tools.size + '）：' + [...tools.keys()].join(', '));
     assert.ok(listeners.has('session/event'));
     const session = { id: 'host-test', header: { cwd: root }, isOwnSeq: () => true };
     const time = new Date(2026, 0, 15, 10).getTime();

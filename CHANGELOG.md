@@ -13,6 +13,66 @@
 
 ---
 
+## [0.17.1] - 2026-11-22
+
+**修 CI：加工具时撞上一条写死数量的断言。**
+
+### 现象
+
+0.17.0 推上去，CI 的「接口自检」job 挂了，5 秒就红：
+
+```
+AssertionError: 7 !== 6
+  at tools/collector-host-test.mjs:33
+```
+
+### 根因
+
+```js
+assert.equal(tools.size, 6);   // ← 我加了 memory_shelve，变成 7 个
+```
+
+**这条断言的方向是反的。**
+
+它守的是「数量正好 6」，于是：
+
+- **加一个工具 → 立刻挂**（这次就是这么挂的）
+- **少一个工具 → 只要还凑够 6 个就不挂**
+
+**该守的是「该注册的都注册了」，不是「正好几个」。**
+
+### 修复
+
+改成断言**具体工具名**：
+
+```js
+for (const name of ['memory_curve_days', 'memory_search', 'memory_curve_day',
+                    'memory_curve_raw', 'memory_curve_build', 'memory_curve_show',
+                    'memory_shelve']) {
+  assert.ok(tools.has(name), '缺工具: ' + name);
+}
+assert.equal(tools.size, 7, '注册了预期之外的工具：' + [...tools.keys()].join(', '));
+```
+
+名字漏了会挂，多出预期外的也会挂（附带把多出来的名字打出来），**数量本身不再是断言对象**。
+
+### 为什么本地没发现
+
+本地 `node --test` 跑的时候用的是**真实 DSH_HOME**，而 CI 用 `/tmp/dsh-home-ci`（全新的）。我之前的本地验证没模拟干净环境 —— 这次补上了：
+
+```
+DSH_HOME=D:\tmp-bench\ci-sim\dsh-home-ci3（空目录）
+node --test tools/collector-test.mjs tools/collector-host-test.mjs
+→ pass 23 / fail 0
+```
+
+**「本地绿 CI 红」这个老问题又出现了**，根因还是同一个：本地环境和 CI 环境不一样，而我拿本地结果当成了结论。
+
+### 验证
+
+`check` 26/0、`selftest` 68/68、`shelve` 8/8、`persist` 42/42、`collector` 23/23（模拟空 DSH_HOME）。
+
+---
 ## [0.17.0] - 2026-11-22
 
 **`memory_shelve`：手动让某条记忆沉底。**
