@@ -670,7 +670,9 @@ export function apply(ctx, config = {}) {
       writeFileSync(f, JSON.stringify({
         at: new Date().toISOString(),
         plugin: 'dsh-memory-curve',
-        injectCompaction: true,
+        // 0.16.4 试过 inject:['compaction']，插件静默不加载（探测文件时间戳不更新）。
+        // 现在 inject 里没有 compaction，这个字段就是当时那轮的结论。
+        injectCompaction: false,
         probe: line,
         hasCompaction: Boolean(svc),
         methods: svc ? {
