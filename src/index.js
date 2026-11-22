@@ -647,7 +647,25 @@ export function apply(ctx, config = {}) {
     if (svc) {
       probe.push(`方法: compactRegion=${typeof svc.compactRegion} compactNow=${typeof svc.compactNow} compactIfNeeded=${typeof svc.compactIfNeeded}`);
     }
-    console.log('[memory-curve] compaction 探测: ' + probe.join(' | '));
+    const line = probe.join(' | ');
+    console.log('[memory-curve] compaction 探测: ' + line);
+    // GUI 版没有终端接住 console.log —— 0.16.2 那次就是这么白重启了一回。
+    // 落一份 JSON 到 memory-notes，重启后直接读文件，不依赖日志。
+    try {
+      const f = join(dshHome(), 'memory-notes', '_compaction-probe.json');
+      mkdirSync(dirname(f), { recursive: true });
+      writeFileSync(f, JSON.stringify({
+        at: new Date().toISOString(),
+        plugin: 'dsh-memory-curve',
+        probe: line,
+        hasCompaction: Boolean(svc),
+        methods: svc ? {
+          compactRegion: typeof svc.compactRegion,
+          compactNow: typeof svc.compactNow,
+          compactIfNeeded: typeof svc.compactIfNeeded,
+        } : null,
+      }, null, 2), 'utf8');
+    } catch { /* 写不进去就算了，不影响插件 */ }
   } catch (e) {
     console.log('[memory-curve] compaction 探测异常: ' + String((e && e.message) || e));
   }

@@ -13,6 +13,36 @@
 
 ---
 
+## [0.16.3] - 2026-11-22
+
+**探测结果落文件 —— 上一版靠 `console.log` 是白重启了一回。**
+
+0.16.2 加了 `compaction` 服务探测，指望从日志里看结果。重启后发现：
+
+```
+~/.dsh/logs/  只有 cookie-clean.log
+```
+
+**Desktop 是 GUI 应用，没有终端接住 `console.log`。** 那一轮重启白费了 —— 而且是我自己设计的探测方式有问题，不是环境。
+
+改成写 `~/.dsh/memory-notes/_compaction-probe.json`：
+
+```json
+{
+  "at": "2026-11-22T...",
+  "probe": "ctx.get=object | ctx.compaction=object | 方法: compactRegion=function ...",
+  "hasCompaction": true,
+  "methods": { "compactRegion": "function", "compactNow": "function", "compactIfNeeded": "function" }
+}
+```
+
+`console.log` 保留（CLI 启动时还有用），文件是 GUI 版的兜底。
+
+### 这次的教训
+
+**探测也要想清楚「结果怎么拿回来」。** 我花了半轮时间写探测、又花一轮等结果，结果取不到 —— 因为设计时就默认有终端。
+
+写探测之前该先问一句：这个输出会出现在哪？如果答不上来，就先修输出通道。
 ## [0.16.2] - 2026-11-22
 
 **加一条只读探测：这个 scope 里能不能拿到 `compaction` 服务。**
