@@ -86,6 +86,25 @@ const back = grab();
 ok('捞回后注入比沉底时更长', back.length > after.length, `${after.length} → ${back.length}`);
 ok('捞回后注入里又有它', back.includes(marker), '没回来');
 
+// ── 事件键路径（0.17.2 修过一个 bug：工具内部把 `e_` 前缀切掉了）──
+console.log('  ── 事件键 / 序号解析 ──');
+{
+  const { eventIds } = await import('../src/digest.js');
+  const { graded: g2 } = build();
+  const withKey = g2.find((x) => x.eventKey);
+  if (withKey) {
+    // 复现工具里的调用：**完整键**，不切前缀
+    const r = eventIds({ digestDir: join(dshHome(), 'memory-notes', '_digest'), eventKey: withKey.eventKey });
+    ok('eventIds 吃完整键（不切 e_ 前缀）', Boolean(r && r.ids && r.ids.length), 'key=' + withKey.eventKey);
+  } else {
+    ok('事件带 eventKey 字段', false, '没有任何事件带 eventKey');
+  }
+  // 序号路径：memory_curve_show 显示的就是 graded 里的 idx
+  const anyIdx = g2.length ? g2[0].idx : null;
+  const hitByIdx = g2.find((x) => x.idx === anyIdx);
+  ok('序号能定位到事件', Boolean(hitByIdx && hitByIdx.ids), 'idx=' + anyIdx);
+}
+
 console.log('');
 console.log(`  ══════ ${pass} 通过 / ${fail} 失败 ══════`);
 process.exit(fail ? 1 : 0);

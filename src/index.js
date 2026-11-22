@@ -1207,10 +1207,15 @@ export function apply(ctx, config = {}) {
             items: { type: 'string' },
             description: 'memory id（m_20261122_abcdef）或事件键（e_20261122_1530）',
           },
+          indices: {
+            type: 'array',
+            items: { type: 'integer' },
+            description: '事件序号（memory_curve_show 里显示的 #N）。跟 targets 二选一或并用。',
+          },
           off: { type: 'boolean', description: 'true = 捞回来，留空/false = 沉底' },
           reason: { type: 'string', description: '为什么沉（只留给人看，不参与计算）' },
         },
-        required: ['targets'],
+        required: [],
       },
       output: {
         schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } }, required: ['text'] },
@@ -1218,23 +1223,42 @@ export function apply(ctx, config = {}) {
       },
       async execute(args) {
         const want = Array.isArray(args?.targets) ? args.targets.map((x) => String(x)).filter(Boolean) : [];
-        if (!want.length) return { text: '没给 targets' };
+        const idxs = Array.isArray(args?.indices) ? args.indices.filter((x) => Number.isInteger(x)) : [];
+        if (!want.length && !idxs.length) {
+          return { text: '没给 targets 也没给 indices。\n可以用 indices: [75]（memory_curve_show 里的 #N），或 targets: ["m_20261122_abcdef"]。' };
+        }
         const ids = [];
         let keyCount = 0;
+        let idxCount = 0;
+        // 序号优先：它比事件键好用 —— 事件键里的时分跟 show 显示的时间不是同一个
+        // （键用的是事件某处的钟点，不是 startAt），照着 show 抄会解析不出来。
+        if (idxs.length) {
+          const { graded } = build();
+          for (const i of idxs) {
+            const g = graded.find((x) => x.idx === i);
+            if (g && Array.isArray(g.ids) && g.ids.length) { ids.push(...g.ids); idxCount++; }
+          }
+        }
         for (const t of want) {
           if (t.startsWith('e_')) {
-            const r = eventIds({ digestDir: digestDir(), eventKey: t.slice(2) });
+            // **别切前缀** —— eventIds 的正则要求完整 `e_YYYYMMDD_HHMM`。
+            // 0.17.1 这里写的是 t.slice(2)，把 `e_` 切掉了，于是永远解析不出来，
+            // 而且报错信息还把责任推给用户（"事件键形如 e_..."），实际给的就是对的。
+            const r = eventIds({ digestDir: digestDir(), eventKey: t });
             if (r && Array.isArray(r.ids) && r.ids.length) { ids.push(...r.ids); keyCount++; }
           } else {
             ids.push(t);
           }
         }
-        if (!ids.length) return { text: `一个 id 都没解析出来（给的是：${want.join(', ')}）\n事件键形如 e_20261122_1530；memory id 形如 m_20261122_abcdef。` };
+        if (!ids.length) {
+          return { text: `一个 id 都没解析出来（targets: ${want.join(', ') || '空'} / indices: ${idxs.join(', ') || '空'}）\n可以用 indices: [75]（memory_curve_show 里的 #N）。` };
+        }
         const off = args?.off === true;
         const r = shelve(accessFile(), ids, !off, args?.reason || '');
         return {
           text: `${off ? '捞回' : '沉底'} ${r.shelved} 条`
-            + (keyCount ? `（含 ${keyCount} 个事件键展开）` : '')
+            + (idxCount ? `（${idxCount} 个序号）` : '')
+            + (keyCount ? `（${keyCount} 个事件键展开）` : '')
             + `\n${off ? '它们会重新出现在注入里。' : '它们不再出现在注入里，但 memory_search 仍能搜到原文。'}`,
         };
       },
