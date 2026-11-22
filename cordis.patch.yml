@@ -11,11 +11,16 @@
     - id: memory-curve
       name: dsh-memory-curve
       config:
-        # 各级最多列几条，控制注入体积。调大更全但更占上下文。
-        maxL1: 12
-        maxL2: 20
-        maxL3: 8
-        # 安装 Bundle（0.3.0 起默认）会启用后台采集；设 false 可关闭，已有流水保留。
+        # ⚠️ 这里**刻意不写** maxL1 / maxL2 / maxL3。
+        #
+        # 0.15.0 把代码默认值从 12/20/8 收到 6/8/3，但这份 patch 里还写死着旧值，
+        # 而 bundle patch 的优先级**高于**代码默认值 —— 结果改了代码等于没改：
+        # 实测真机注入一直是 834 token，而同一份代码用默认值跑出来是 690。
+        #
+        # 同一个数写在两处，必然漂。要调配额就改 src/index.js 的 Config 默认值；
+        # 真要在这里覆盖也行，但别再照抄默认值当文档。
+        #
+        # autoCollect 不能删：它控制后台采集，默认 false（见 collector-host-test）。
         autoCollect: true
         collectSubagents: false
         # collectExcludeCwds: 'C:\private;D:\private' # 路径及其子目录排除
