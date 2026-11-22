@@ -51,6 +51,7 @@ export const CODE_FILES = [
   'tools/check.mjs',
   'tools/persist-test.mjs',
   'tools/recall-bench.mjs',
+  'tools/shelve-test.mjs',
 ];
 
 /** 导出文档的尾部（CI 配置放最后） */

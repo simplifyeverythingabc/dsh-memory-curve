@@ -1013,7 +1013,7 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
 
     // 实证权重：这条路上的记忆被真正查过几次。查过就是投票，
     // 比单靠条数密度猜更可信。没查过则为 1，不奖不罚。
-    const acc = accessFn ? accessFn(ev) : { n: 0, last: null, ts: [], suppress: 0 };
+    const acc = accessFn ? accessFn(ev) : { n: 0, last: null, ts: [], suppress: 0, shelved: false };
     // 提取强度：边际递减 —— 第 1 次提取的巩固价值远大于第 20 次。
     const retrieval = 1 + 0.18 * Math.log(1 + (acc.n || 0));
 
@@ -1105,6 +1105,9 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
       // 提取诱发遗忘：这条被别的提取压住了多少（0~0.35）。只影响排序，不改 level ——
       // 被压住的仍然看得到，只是排后面。见 access.js 的 SUPPRESS_* 注释。
       suppress: Math.round((acc.suppress || 0) * 1000) / 1000,
+    // 手动沉底（0.17.0）：不在注入里出现，但 memory_search 仍能搜到。
+    // 它跟 suppress 不同 —— 那个是被动压住、6 小时自己恢复；这个是主动标沉、直到解除。
+    shelved: Boolean(acc.shelved),
       // 睡眠巩固：跨了几夜、折扣了多少衰减速度（1.0 ~ 1.24）。报告与测试要能看到。
       nights: cons.nights,
       consolidation: Math.round(cons.factor * 1000) / 1000,
@@ -1151,7 +1154,11 @@ export function gradeEvents(events, now = Date.now(), accessFn = null) {
   const SCHEMA_DEMOTE_TO = 0.85;
   const rank = (g) => {
     const schema = (g.threadS || 0) >= SCHEMA_DEMOTE_AT ? SCHEMA_DEMOTE_TO : 1;
-    return g.R * Math.log(1 + g.S) * (1 - (g.suppress || 0)) * schema;
+    // 手动沉底（0.17.0）：排到最后，但**不是 0**。
+    // 用 0.02 而不是 0 —— 它还活着，只是不主动提；真到只剩它的时候也该能被翻出来。
+    // 这是「想起来」和「忘掉」的区别，人也没法真正删记忆。
+    const shelf = g.shelved ? 0.02 : 1;
+    return g.R * Math.log(1 + g.S) * (1 - (g.suppress || 0)) * schema * shelf;
   };
 
   // ── 第二道闸：相对配额 ───────────────────────────────────────────────
@@ -1206,7 +1213,10 @@ export const MAX_THREADS_CAP = 20;
 const TITLE_CHARS = 32;
 
 export function renderForPrompt(graded, { maxL1 = 6, maxL2 = 8, maxL3 = 3, maxThreads = 2, maxOlder = 0, threads = null, now = Date.now() } = {}) {
-  const by = (lv) => graded.filter((g) => g.level === lv);
+  // 沉底的不进注入 —— 这是它唯一的作用：省掉那份 token。
+  // 检索路径（searchAll / readById）完全不受影响，原文照旧能查。
+  const live = graded.filter((g) => !g.shelved);
+  const by = (lv) => live.filter((g) => g.level === lv);
 
   /**
    * 相对时间（0.4.2）
@@ -1348,7 +1358,7 @@ export function renderForPrompt(graded, { maxL1 = 6, maxL2 = 8, maxL3 = 3, maxTh
   // 历史补位必须排除已经注入过的：以前没有这一步，
   // L3 里刚出现过的条目会在「更早 · 按 S 补位」里原样再来一遍，白占 4 行预算。
   const shown = new Set([...l1, ...l2, ...l3].map((g) => g.idx));
-  const olderPool = graded
+  const olderPool = live
     .filter((g) => (now - g.startAt) / DAY2 >= 7 && !shown.has(g.idx))
     .map((g) => ({ g, w: g.S * (isChat(g) ? 0.25 : 1) * (1 + technicality(g)) }))
     .sort((a, b) => b.w - a.w)

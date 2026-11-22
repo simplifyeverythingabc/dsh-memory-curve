@@ -129,6 +129,61 @@ export function stats(file, id) {
 }
 
 /**
+ * 「沉底」：手动让某几条记忆不再被主动提起（0.17.0）。
+ *
+ * ── 跟 suppress 的区别，这个区别是设计出来的 ──────────────────────
+ *
+ *   suppress  是**被动**的：提取别的记忆时顺带压住这条（retrieval-induced
+ *             forgetting），半衰期 6 小时，自己会恢复。
+ *   shelve    是**主动**的：一直沉底，直到有人手动解除。
+ *
+ * ── 它不删除任何东西 ─────────────────────────────────────────────
+ *
+ * 原文还在 md 文件里，`memory_search` 照样搜得到，`memory_curve_raw` 照样取得出。
+ * 唯一的变化是：**不再出现在注入里**，不占那 700 token。
+ *
+ * 这是「想不起来」和「忘了」的区别 —— 人也没法真正删掉记忆，只能让它沉下去；
+ * 沉下去的东西可以被线索勾回来。
+ *
+ * ── 为什么值得做 ─────────────────────────────────────────────────
+ *
+ * 记忆插件本来是**自动**决定什么重要（按 R、S、显著性、未完成度排）。
+ * 但有些事只有当事人知道：某件事已经彻底结了、某个方向不做了、某段对话不想再被提。
+ * 自动策略判断不出来，只能人工标。
+ *
+ * 这就是 MemGPT 那套「模型自己控制上下文」里真正有用的部分 ——
+ * 不是改写历史（DSH 不给这个权限，0.16.4 验过了），而是**改一下排序的权重**。
+ *
+ * @param {string} file - _access.json 路径
+ * @param {string[]} ids - memory id 列表
+ * @param {boolean} on - true 沉底 / false 捞回来
+ * @param {string} reason - 为什么沉（留给人看，不参与计算）
+ */
+export function shelve(file, ids, on = true, reason = '', now = Date.now()) {
+  if (!ids || !ids.length) return { shelved: 0, on };
+  const data = load(file);
+  const at = new Date(now).toISOString();
+  let n = 0;
+  for (const id of ids) {
+    if (!id) continue;
+    const rec = data[id] || { n: 0, last: null, first: at, ts: [] };
+    if (on) {
+      rec.shelf = { at, reason: String(reason || '').slice(0, 80) };
+    } else {
+      delete rec.shelf;
+      rec.unshelfAt = at;
+    }
+    data[id] = rec;
+    n++;
+  }
+  flush(file, data);
+  return { shelved: n, on };
+}
+
+/** 这条记录是否被沉底。老记录没有 shelf 字段，自然返回 false。 */
+export const isShelved = (rec) => Boolean(rec && rec.shelf && rec.shelf.at);
+
+/**
  * 把一个事件的多个 id 的提取时间戳并成一条时间线。
  *
  * 为什么要按分钟去重：一次 `memory_curve_raw(event:...)` 会把该事件下**所有** id
@@ -210,7 +265,10 @@ export function sumAccess(file, ids, now = Date.now()) {
     if (s > suppressAmt) suppressAmt = s;
     recs.push(rec);
   }
-  return { n, last, ts: mergeTs(recs), suppress: suppressAmt };
+  // 沉底是整体的：事件下只要有一个 id 被标沉，整个事件就不再主动提。
+  // （一个事件本来就当成一个记忆单元，不会只沉半句。）
+  const shelved = recs.some(isShelved);
+  return { n, last, ts: mergeTs(recs), suppress: suppressAmt, shelved };
 }
 
 /** 判定状态 */

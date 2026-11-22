@@ -36,7 +36,7 @@ import z from '@deepseek-ai/schemastery';
 import { readEntries, clusterEvents, gradeEvents, renderForPrompt, currentThreads as clusterThreads, LEVEL_NAME } from './events.js';
 import { resolveMemDir, dshHome, normalizeDir } from './paths.js';
 import { buildDailies, readDigest, listDays, grepDay, readById, readByIds, searchAll, expandRange, eventIds, makeMatcher } from './digest.js';
-import { touch, sumAccess, stateOf, STATE_LABEL, suppress, SUPPRESS_DEFAULT } from './access.js';
+import { touch, sumAccess, stateOf, STATE_LABEL, suppress, shelve, SUPPRESS_DEFAULT } from './access.js';
 import { createEmbedder, EMBED_MIRROR } from './embed.js';
 import { narrateDay } from './narrate.js';
 import { scanFiles, planReuse, loadIndex, saveIndex } from './persist.js';
@@ -1180,6 +1180,64 @@ export function apply(ctx, config = {}) {
         return { days: r.written.length, entries: r.total, events: r.events, chars, report: gradeFile() };
       },
       presentCall: () => ({ card: 'generic', title: '重算记忆', kind: 'other', rawInput: '' }),
+    }));
+
+    // ── 6. 手动沉底 / 捞回（0.17.0）
+    //
+    // 记忆插件本来**自己**决定什么重要（按 R、S、显著性、未完成度排）。
+    // 但有些事只有当事人知道：某件事彻底结了、某个方向不做了、某段对话不想再被提起。
+    // 自动策略判断不出来，只能人工标。
+    //
+    // 沉底**不删任何东西**：原文还在 md 里，`memory_search` 照样搜得到，
+    // `memory_curve_raw` 照样取得出。唯一变化是**不再出现在注入里**，不占那份 token。
+    //
+    // 这是「想不起来」和「忘了」的区别 —— 人也没法真正删记忆，只能让它沉下去；
+    // 沉下去的东西可以被线索勾回来。
+    //
+    // 也是 MemGPT 那套「模型自己控制上下文」里真正能用的部分：
+    // 不是改写历史（DSH 不给权限，0.16.4 验过了），而是**改一下排序权重**。
+    disposers.push(tools.register({
+      name: 'memory_shelve',
+      description: '让某条记忆沉底——不再出现在系统提示里（省 token），但 memory_search 仍然搜得到。传 off:true 捞回来。',
+      parameters: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          targets: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'memory id（m_20261122_abcdef）或事件键（e_20261122_1530）',
+          },
+          off: { type: 'boolean', description: 'true = 捞回来，留空/false = 沉底' },
+          reason: { type: 'string', description: '为什么沉（只留给人看，不参与计算）' },
+        },
+        required: ['targets'],
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } }, required: ['text'] },
+        render: (_a, v) => [{ type: 'text', text: v.text }],
+      },
+      async execute(args) {
+        const want = Array.isArray(args?.targets) ? args.targets.map((x) => String(x)).filter(Boolean) : [];
+        if (!want.length) return { text: '没给 targets' };
+        const ids = [];
+        let keyCount = 0;
+        for (const t of want) {
+          if (t.startsWith('e_')) {
+            const r = eventIds({ digestDir: digestDir(), eventKey: t.slice(2) });
+            if (r && Array.isArray(r.ids) && r.ids.length) { ids.push(...r.ids); keyCount++; }
+          } else {
+            ids.push(t);
+          }
+        }
+        if (!ids.length) return { text: `一个 id 都没解析出来（给的是：${want.join(', ')}）\n事件键形如 e_20261122_1530；memory id 形如 m_20261122_abcdef。` };
+        const off = args?.off === true;
+        const r = shelve(accessFile(), ids, !off, args?.reason || '');
+        return {
+          text: `${off ? '捞回' : '沉底'} ${r.shelved} 条`
+            + (keyCount ? `（含 ${keyCount} 个事件键展开）` : '')
+            + `\n${off ? '它们会重新出现在注入里。' : '它们不再出现在注入里，但 memory_search 仍能搜到原文。'}`,
+        };
+      },
     }));
 
     // ── 5. 按等级翻事件
